@@ -853,6 +853,13 @@ class PPOTrainer(ABC):
 
     def save_logs_and_checkpoints(self, args, global_step, step_bar, logs_dict={}, client_states={}, is_eval=False, eval_save=False):
         if global_step % args.logging_steps == 0 or is_eval:
+            # gate value logging for reasoning-conditioned ViT
+            if (hasattr(self.experience_maker, 'conditioner') and
+                    self.experience_maker.conditioner is not None and
+                    hasattr(self.experience_maker.conditioner, 'conditioned_vit')):
+                for name, layer in self.experience_maker.conditioner.conditioned_vit.adapter_layers.items():
+                    gate_val = torch.tanh(layer.gate).item()
+                    logs_dict[f"conditioner/gate_block_{name}"] = gate_val
             # wandb
             tagname = 'eval' if is_eval else 'train'
             if self._wandb is not None and self.strategy.is_rank_0():

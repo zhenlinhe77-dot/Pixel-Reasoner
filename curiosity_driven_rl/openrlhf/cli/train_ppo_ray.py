@@ -427,6 +427,8 @@ if __name__ == "__main__":
     parser.add_argument("--think_only", type=int, default=0)
     parser.add_argument("--kl_penalty_coef", type=float, default=0.0)
     parser.add_argument("--entropy_loss_coef", type=float, default=0.0)
+    parser.add_argument("--use_conditioner", action="store_true", default=False,
+                        help="Enable reasoning-conditioned ViT re-encoding (ReasoningConditionerV2)")
     args = parser.parse_args()
 
     if args.advantage_estimator not in ["gae"]:

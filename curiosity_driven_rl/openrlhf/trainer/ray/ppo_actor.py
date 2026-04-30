@@ -178,7 +178,11 @@ class ActorPPOTrainer(PPOTrainer):
         return status
 
     def training_step(self, experience: Experience, global_steps, **kwargs) -> Dict[str, float]:
-        return self.training_step_actor(experience, global_steps=global_steps, **kwargs)
+        status = self.training_step_actor(experience, global_steps=global_steps, **kwargs)
+        if getattr(self, 'conditioner_optim', None) is not None:
+            self.conditioner_optim.step()
+            self.conditioner_optim.zero_grad()
+        return status
 
     def _broadcast_to_vllm(self):
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
@@ -277,6 +281,13 @@ class ActorPPOTrainer(PPOTrainer):
                 self.processor or self.tokenizer,
                 save_path,
             )
+            if (hasattr(self.experience_maker, 'conditioner') and
+                    self.experience_maker.conditioner is not None and
+                    isinstance(self.experience_maker.conditioner, nn.Module) and
+                    self.strategy.is_rank_0()):
+                conditioner_path = os.path.join(save_path, "conditioner.pt")
+                torch.save(self.experience_maker.conditioner.state_dict(), conditioner_path)
+                print(f"[ConditionedViT] Saved conditioner to {conditioner_path}")
             max_num = args.max_ckpt_num
             if self.strategy.is_rank_0():
                 while True:
@@ -420,6 +431,9 @@ class ActorModelRayActor(BasePPORole):
             _, states = strategy.load_ckpt(self.actor.model, ckpt_path)
             self.consumed_samples = states["consumed_samples"]
             strategy.print(f"Loaded the checkpoint: {ckpt_path}, consumed_samples: {self.consumed_samples}")
+
+        # conditioner optimizer — separate from DeepSpeed-managed actor optimizer
+        self.conditioner_optim = None
 
     def prepare_datasets(self):
         strategy = self.strategy
@@ -574,6 +588,34 @@ class ActorModelRayActor(BasePPORole):
         if args.load_checkpoint and os.path.exists(ckpt_path) and not vllm_engines is None:
             torch.distributed.barrier()
             trainer._broadcast_to_vllm()
+
+        # conditioner: load from latest checkpoint, set up optimizer
+        trainer.conditioner_optim = None
+        if (hasattr(trainer.experience_maker, 'conditioner') and
+                trainer.experience_maker.conditioner is not None and
+                hasattr(trainer.experience_maker.conditioner, 'get_trainable_parameters')):
+            # load conditioner.pt from the most recent _hf dir if available
+            ckpt_dir = args.ckpt_path
+            if os.path.exists(ckpt_dir):
+                hf_dirs = sorted(
+                    [d for d in os.listdir(ckpt_dir) if d.endswith('_hf') and os.path.isdir(os.path.join(ckpt_dir, d))],
+                    key=lambda d: os.path.getmtime(os.path.join(ckpt_dir, d))
+                )
+                if hf_dirs:
+                    conditioner_path = os.path.join(ckpt_dir, hf_dirs[-1], "conditioner.pt")
+                    if os.path.exists(conditioner_path):
+                        trainer.experience_maker.conditioner.load_state_dict(
+                            torch.load(conditioner_path, map_location='cuda')
+                        )
+                        print(f"[ConditionedViT] Loaded conditioner from {conditioner_path}")
+            conditioner_params = trainer.experience_maker.conditioner.get_trainable_parameters()
+            if conditioner_params:
+                trainer.conditioner_optim = torch.optim.AdamW(
+                    conditioner_params, lr=args.actor_learning_rate * 0.1
+                )
+                print(f"[ConditionedViT] Conditioner optimizer: AdamW lr={args.actor_learning_rate * 0.1:.2e}, "
+                      f"params={sum(p.numel() for p in conditioner_params):,}")
+
         print(f"===> [verbose] trainer.fit()")
         trainer.fit(
             args,

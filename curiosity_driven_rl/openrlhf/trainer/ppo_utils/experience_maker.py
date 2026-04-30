@@ -1236,6 +1236,8 @@ def execute_tool(images, rawimages, args, toolname, is_video, function=None):
             else:
                 tmp = images[index]
             image_to_crop = tmp
+        if toolname == 'reencode':
+            return image_to_crop  # identity; conditioner applies post-processing in experience_maker
         if function is None: function = crop_image_normalized
         cropped_image = function(image_to_crop, args['bbox_2d'])
     return cropped_image
@@ -1447,10 +1449,33 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         ###### old version
         # self.tools = [CropImageNormalized().function]
         ####### new version
-        self.operations = dict(crop_image_normalized=CropImageNormalized(), select_frames=SelectFrames())
+        from openrlhf.trainer.ppo_utils.reencode_patch import ReEncode, ReasoningConditioner
+        self.operations = dict(crop_image_normalized=CropImageNormalized(), select_frames=SelectFrames(), reencode=ReEncode())
         notool = getattr(self.strategy.args, "system_prompt", "none")=="notool"
-        
-        self.tools = [] if notool else [self.operations[k].function for k in ['crop_image_normalized', 'select_frames']]
+
+        conditioner_enabled = getattr(self.strategy.args, "use_conditioner", False)
+        if conditioner_enabled and not notool:
+            from openrlhf.trainer.ppo_utils.reasoning_conditioned_vit import ReasoningConditionerV2
+            from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+            model_path = self.strategy.args.pretrain
+            print(f"[ConditionedViT] Loading ViT from {model_path} for reasoning conditioner...")
+            _tmp_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_path, torch_dtype=torch.bfloat16, device_map="cpu"
+            )
+            vit_module = _tmp_model.visual
+            del _tmp_model
+            torch.cuda.empty_cache()
+            _processor = AutoProcessor.from_pretrained(model_path)
+            self.conditioner = ReasoningConditionerV2(
+                vit=vit_module, tokenizer=self.tokenizer, processor=_processor, device="cuda"
+            )
+            self.conditioner = self.conditioner.to("cuda").to(torch.bfloat16)
+            self.conditioner.conditioned_vit.print_trainable_stats()
+            print("[ConditionedViT] Conditioner initialized successfully.")
+        else:
+            self.conditioner = ReasoningConditioner() if not notool else None
+
+        self.tools = [] if notool else [self.operations[k].function for k in ['crop_image_normalized', 'select_frames', 'reencode']]
         print(f"!!!! [check] prompt notool={notool}")
         self.prompt_maker = NousFnCallPrompt()
 
@@ -2269,41 +2294,56 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 temp_error_flags[out_idx] = False
                 tool_params = None
                 try:
-                    tool_params = parse_last_tool(qatext) 
+                    tool_params = parse_last_tool(qatext)
                     tool_name = tool_params['name']
                     tool_args = tool_params['arguments']
-                    
+
+                    conditioner_is_live = (
+                        self.conditioner is not None
+                        and hasattr(self.conditioner, 'conditioned_vit')
+                    )
+                    reasoning_so_far = None
+                    if tool_name == 'reencode' or conditioner_is_live:
+                        reasoning_so_far = ""
+                        for turn in all_conversations[uuid]:
+                            if turn['role'] == 'assistant':
+                                for item in turn.get('content', []):
+                                    if isinstance(item, dict) and item.get('type') == 'text':
+                                        reasoning_so_far += item['text'] + "\n"
+
                     raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call)
-                    if tool_name=='select_frames': 
-                        
-                        selected_frames, info = raw_result 
-                        if not isinstance(info, str): # info is the replacement 
+                    if tool_name=='select_frames':
+
+                        selected_frames, info = raw_result
+                        if not isinstance(info, str): # info is the replacement
                             # assert "" in msg_this[-1]['content'][0]['text']
                             oldtext = msg_this[-1]['content'][0]['text']
                             newtext = oldtext.replace(str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]), str(info))
-                            msg_this[-1]['content'][0]['text'] = newtext 
-                        
+                            msg_this[-1]['content'][0]['text'] = newtext
+
                         if is_eval:
                             added = selected_frames
                         else:
                             added = [resize_cropped(ff, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else select_maxsize)*28*28) for ff in selected_frames]
-                        
+
                         if len(selected_frames)==0:
                             msg_this.append(
                                 dict(role='user', content=[
                                     dict(type='text', text=f"\n{info}"),
                                 ] )
                             )
-                        else:    
+                        else:
                             msg_this.append(
                             dict(role='user', content=[
                                 dict(type='text', text="\nHere are the selected frames (Frame Size: {}x{}, Numbered {} to {}):".format(added[0].size[0], added[0].size[1], len(imagelist), len(selected_frames)+len(imagelist)-1)),
                             ] + [dict(type='image', image=targetpath) for _ in range(len(selected_frames))])
                             )
-                        
+
                     else:
                         mtoken = maxtokens[out_idx]
                         proc_img = resize_cropped(raw_result, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
+                        if conditioner_is_live and reasoning_so_far is not None:
+                            proc_img = self.conditioner.process(proc_img, focus_hint="", reasoning_history=reasoning_so_far)
                         if do_dump:
                             proc_img.save(targetpath)
                             print('dumped', targetpath)
