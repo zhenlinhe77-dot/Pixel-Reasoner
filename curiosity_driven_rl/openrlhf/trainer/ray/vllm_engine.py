@@ -183,8 +183,9 @@ def create_vllm_engines(
     vllm_enable_sleep=False,
 ):
     import vllm
+    from packaging.version import Version as V
 
-    assert vllm.__version__ >= "0.7.0", "OpenRLHF only supports vllm >= 0.7.0"
+    assert V(vllm.__version__) >= V("0.7.0"), "OpenRLHF only supports vllm >= 0.7.0"
 
     vllm_engines = []
     num_gpus = int(tensor_parallel_size == 1)
@@ -196,7 +197,7 @@ def create_vllm_engines(
 
         # Hybrid engine
         if shared_pg is not None:
-            assert vllm.__version__ >= "0.7.2", "Only vllm >= 0.7.2 supports hybrid engine"
+            assert V(vllm.__version__) >= V("0.7.2"), "Only vllm >= 0.7.2 supports hybrid engine"
 
             if tensor_parallel_size > 1:
                 scheduling_strategy = PlacementGroupSchedulingStrategy(
