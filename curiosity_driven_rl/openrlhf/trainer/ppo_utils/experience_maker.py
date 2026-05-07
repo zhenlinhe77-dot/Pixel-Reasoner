@@ -1456,14 +1456,14 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         conditioner_enabled = getattr(self.strategy.args, "use_conditioner", False)
         if conditioner_enabled and not notool:
             from openrlhf.trainer.ppo_utils.reasoning_conditioned_vit import ReasoningConditionerV2
-            from transformers import AutoProcessor, Qwen2_5_VLConfig
-            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLVisionTransformer
+            from transformers import AutoProcessor, Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration
             import safetensors.torch as st
             import json, os as _os
             model_path = self.strategy.args.pretrain
             print(f"[ConditionedViT] Loading ViT weights from {model_path} (visual-only, fast path)...")
-            # Load only model.visual.* weights from safetensors shards to avoid
-            # loading the full 7B model to CPU (which would block rendezvous for ~25 min).
+            # Load only model.visual.* weights from safetensors/bin shards, then
+            # instantiate the ViT by building a meta-device skeleton of the full
+            # model (zero allocation) and materialising only the visual submodule.
             _st_index = _os.path.join(model_path, "model.safetensors.index.json")
             _bin_index = _os.path.join(model_path, "pytorch_model.bin.index.json")
             _vit_state = {}
@@ -1488,8 +1488,13 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     f"[ConditionedViT] No weight index found in {model_path}. "
                     "Expected model.safetensors.index.json or pytorch_model.bin.index.json."
                 )
+            # Build skeleton on meta device (no memory allocated), materialise
+            # only the ViT submodule on CPU, then load the visual weights.
             _config = Qwen2_5_VLConfig.from_pretrained(model_path)
-            vit_module = Qwen2_5_VLVisionTransformer(_config.vision_config).to(torch.bfloat16)
+            with torch.device("meta"):
+                _skeleton = Qwen2_5_VLForConditionalGeneration(_config)
+            vit_module = _skeleton.model.visual.to_empty(device="cpu").to(torch.bfloat16)
+            del _skeleton
             _missing, _unexpected = vit_module.load_state_dict(_vit_state, strict=False)
             if _missing:
                 print(f"[ConditionedViT] Warning: {len(_missing)} missing keys in ViT state dict")
