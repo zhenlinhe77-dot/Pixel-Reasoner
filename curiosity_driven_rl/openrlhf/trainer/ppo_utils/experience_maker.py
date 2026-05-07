@@ -1493,7 +1493,10 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             _config = Qwen2_5_VLConfig.from_pretrained(model_path)
             with torch.device("meta"):
                 _skeleton = Qwen2_5_VLForConditionalGeneration(_config)
-            vit_module = _skeleton.model.visual.to_empty(device="cpu").to(torch.bfloat16)
+            # transformers 4.x: visual is at model level; 5.x: at model.model level
+            _vit_raw = getattr(_skeleton, "visual", None) or getattr(_skeleton.model, "visual", None)
+            assert _vit_raw is not None, "Cannot find ViT submodule on model or model.model"
+            vit_module = _vit_raw.to_empty(device="cpu").to(torch.bfloat16)
             del _skeleton
             _missing, _unexpected = vit_module.load_state_dict(_vit_state, strict=False)
             if _missing:
