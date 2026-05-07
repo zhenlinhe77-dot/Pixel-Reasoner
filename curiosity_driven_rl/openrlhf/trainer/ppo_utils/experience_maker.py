@@ -1462,7 +1462,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             _tmp_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 model_path, torch_dtype=torch.bfloat16, device_map="cpu"
             )
-            vit_module = _tmp_model.visual
+            vit_module = _tmp_model.model.visual
             del _tmp_model
             torch.cuda.empty_cache()
             _processor = AutoProcessor.from_pretrained(model_path)
