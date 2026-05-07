@@ -2633,7 +2633,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                 
                 visual_inputs = self.data_processor.processor(
                     text=[new_text],
-                    images=batch_images,
+                    images=batch_images if (batch_images and batch_images[0]) else None,
                     videos=[video], # [[blank_image]],
                     padding=True,
                     max_length=20000,
