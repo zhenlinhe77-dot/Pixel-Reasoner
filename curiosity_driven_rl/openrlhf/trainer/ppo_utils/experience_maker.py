@@ -1467,22 +1467,31 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             _st_index = _os.path.join(model_path, "model.safetensors.index.json")
             _bin_index = _os.path.join(model_path, "pytorch_model.bin.index.json")
             _vit_state = {}
+
+            def _extract_vit_weights(wmap, load_fn):
+                # Detect prefix: transformers 4.x saves as "visual.*",
+                # transformers 5.x saves as "model.visual.*".
+                for _pfx in ("visual.", "model.visual."):
+                    _shards = sorted(set(v for k, v in wmap.items() if k.startswith(_pfx)))
+                    if _shards:
+                        _state = {}
+                        for _shard in _shards:
+                            for k, v in load_fn(_shard).items():
+                                if k.startswith(_pfx):
+                                    _state[k[len(_pfx):]] = v
+                        return _state
+                raise RuntimeError(f"No visual.* or model.visual.* keys found in weight index")
+
             if _os.path.exists(_st_index):
                 _wmap = json.load(open(_st_index))["weight_map"]
-                _visual_shards = sorted(set(v for k, v in _wmap.items() if k.startswith("model.visual.")))
-                for _shard in _visual_shards:
-                    _shard_data = st.load_file(_os.path.join(model_path, _shard))
-                    for k, v in _shard_data.items():
-                        if k.startswith("model.visual."):
-                            _vit_state[k[len("model.visual."):]] = v
+                _vit_state = _extract_vit_weights(
+                    _wmap, lambda s: st.load_file(_os.path.join(model_path, s))
+                )
             elif _os.path.exists(_bin_index):
                 _wmap = json.load(open(_bin_index))["weight_map"]
-                _visual_shards = sorted(set(v for k, v in _wmap.items() if k.startswith("model.visual.")))
-                for _shard in _visual_shards:
-                    _shard_data = torch.load(_os.path.join(model_path, _shard), map_location="cpu")
-                    for k, v in _shard_data.items():
-                        if k.startswith("model.visual."):
-                            _vit_state[k[len("model.visual."):]] = v
+                _vit_state = _extract_vit_weights(
+                    _wmap, lambda s: torch.load(_os.path.join(model_path, s), map_location="cpu")
+                )
             else:
                 raise FileNotFoundError(
                     f"[ConditionedViT] No weight index found in {model_path}. "
