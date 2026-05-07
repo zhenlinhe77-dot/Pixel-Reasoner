@@ -1464,15 +1464,30 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             print(f"[ConditionedViT] Loading ViT weights from {model_path} (visual-only, fast path)...")
             # Load only model.visual.* weights from safetensors shards to avoid
             # loading the full 7B model to CPU (which would block rendezvous for ~25 min).
-            _index = json.load(open(_os.path.join(model_path, "model.safetensors.index.json")))
-            _wmap = _index["weight_map"]
-            _visual_shards = sorted(set(v for k, v in _wmap.items() if k.startswith("model.visual.")))
+            _st_index = _os.path.join(model_path, "model.safetensors.index.json")
+            _bin_index = _os.path.join(model_path, "pytorch_model.bin.index.json")
             _vit_state = {}
-            for _shard in _visual_shards:
-                _shard_data = st.load_file(_os.path.join(model_path, _shard))
-                for k, v in _shard_data.items():
-                    if k.startswith("model.visual."):
-                        _vit_state[k[len("model.visual."):]] = v
+            if _os.path.exists(_st_index):
+                _wmap = json.load(open(_st_index))["weight_map"]
+                _visual_shards = sorted(set(v for k, v in _wmap.items() if k.startswith("model.visual.")))
+                for _shard in _visual_shards:
+                    _shard_data = st.load_file(_os.path.join(model_path, _shard))
+                    for k, v in _shard_data.items():
+                        if k.startswith("model.visual."):
+                            _vit_state[k[len("model.visual."):]] = v
+            elif _os.path.exists(_bin_index):
+                _wmap = json.load(open(_bin_index))["weight_map"]
+                _visual_shards = sorted(set(v for k, v in _wmap.items() if k.startswith("model.visual.")))
+                for _shard in _visual_shards:
+                    _shard_data = torch.load(_os.path.join(model_path, _shard), map_location="cpu")
+                    for k, v in _shard_data.items():
+                        if k.startswith("model.visual."):
+                            _vit_state[k[len("model.visual."):]] = v
+            else:
+                raise FileNotFoundError(
+                    f"[ConditionedViT] No weight index found in {model_path}. "
+                    "Expected model.safetensors.index.json or pytorch_model.bin.index.json."
+                )
             _config = Qwen2_5_VLConfig.from_pretrained(model_path)
             vit_module = Qwen2_5_VLVisionTransformer(_config.vision_config).to(torch.bfloat16)
             _missing, _unexpected = vit_module.load_state_dict(_vit_state, strict=False)
