@@ -630,10 +630,17 @@ class ReasoningConditionerV2(nn.Module):
         """
         from qwen_vl_utils import process_vision_info
 
-        messages = [{"role": "user", "content": [{"type": "image", "image": image}]}]
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": image},
+            {"type": "text", "text": ""},
+        ]}]
         image_inputs, _ = process_vision_info(messages)
+        text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False
+        )
 
         inputs = self.processor(
+            text=[text],
             images=image_inputs,
             return_tensors="pt",
         )
