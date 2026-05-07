@@ -511,7 +511,7 @@ class FeatureDecoder(nn.Module):
     def to_pil(self, features: torch.Tensor) -> Image.Image:
         with torch.no_grad():
             img_tensor = self.forward(features.unsqueeze(0))
-            img_np = (img_tensor[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            img_np = (img_tensor[0].permute(1, 2, 0).float().cpu().numpy() * 255).astype(np.uint8)
             return Image.fromarray(img_np, 'RGB')
 
 
