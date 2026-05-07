@@ -1456,14 +1456,29 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         conditioner_enabled = getattr(self.strategy.args, "use_conditioner", False)
         if conditioner_enabled and not notool:
             from openrlhf.trainer.ppo_utils.reasoning_conditioned_vit import ReasoningConditionerV2
-            from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+            from transformers import AutoProcessor, Qwen2_5_VLConfig
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLVisionTransformer
+            import safetensors.torch as st
+            import json, os as _os
             model_path = self.strategy.args.pretrain
-            print(f"[ConditionedViT] Loading ViT from {model_path} for reasoning conditioner...")
-            _tmp_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                model_path, torch_dtype=torch.bfloat16, device_map="cpu"
-            )
-            vit_module = _tmp_model.model.visual
-            del _tmp_model
+            print(f"[ConditionedViT] Loading ViT weights from {model_path} (visual-only, fast path)...")
+            # Load only model.visual.* weights from safetensors shards to avoid
+            # loading the full 7B model to CPU (which would block rendezvous for ~25 min).
+            _index = json.load(open(_os.path.join(model_path, "model.safetensors.index.json")))
+            _wmap = _index["weight_map"]
+            _visual_shards = sorted(set(v for k, v in _wmap.items() if k.startswith("model.visual.")))
+            _vit_state = {}
+            for _shard in _visual_shards:
+                _shard_data = st.load_file(_os.path.join(model_path, _shard))
+                for k, v in _shard_data.items():
+                    if k.startswith("model.visual."):
+                        _vit_state[k[len("model.visual."):]] = v
+            _config = Qwen2_5_VLConfig.from_pretrained(model_path)
+            vit_module = Qwen2_5_VLVisionTransformer(_config.vision_config).to(torch.bfloat16)
+            _missing, _unexpected = vit_module.load_state_dict(_vit_state, strict=False)
+            if _missing:
+                print(f"[ConditionedViT] Warning: {len(_missing)} missing keys in ViT state dict")
+            del _vit_state
             torch.cuda.empty_cache()
             _processor = AutoProcessor.from_pretrained(model_path)
             self.conditioner = ReasoningConditionerV2(
