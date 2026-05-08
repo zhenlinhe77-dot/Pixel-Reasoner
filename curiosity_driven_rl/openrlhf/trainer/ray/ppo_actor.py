@@ -283,7 +283,7 @@ class ActorPPOTrainer(PPOTrainer):
             )
             if (hasattr(self.experience_maker, 'conditioner') and
                     self.experience_maker.conditioner is not None and
-                    isinstance(self.experience_maker.conditioner, nn.Module) and
+                    isinstance(self.experience_maker.conditioner, torch.nn.Module) and
                     self.strategy.is_rank_0()):
                 conditioner_path = os.path.join(save_path, "conditioner.pt")
                 torch.save(self.experience_maker.conditioner.state_dict(), conditioner_path)
