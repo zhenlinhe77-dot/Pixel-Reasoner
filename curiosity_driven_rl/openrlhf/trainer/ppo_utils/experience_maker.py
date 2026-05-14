@@ -2391,6 +2391,31 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                         proc_img = resize_cropped(raw_result, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
                         if conditioner_is_live and reasoning_so_far is not None:
                             proc_img = self.conditioner.process(proc_img, focus_hint="", reasoning_history=reasoning_so_far)
+                            # Path B: store raw (pre-conditioning) inputs so training_step_actor
+                            # can recompute conditioned_vit with gradients (no FeatureDecoder).
+                            # Overwrites on multiple reencodes — keeps last one per uuid.
+                            try:
+                                if not hasattr(self, '_reenc_store'):
+                                    self._reenc_store = {}
+                                _raw_pv, _raw_thw = self.conditioner._preprocess_image(raw_result)
+                                _raw_tok = self.conditioner.tokenizer(
+                                    reasoning_so_far,
+                                    return_tensors="pt",
+                                    max_length=2048,
+                                    truncation=True,
+                                    padding=True,
+                                )
+                                # image_idx = position this image will occupy in all_images[uuid]
+                                # (recorded before the append that happens at line ~2428)
+                                self._reenc_store[uuid] = dict(
+                                    pixel_values=_raw_pv.cpu(),
+                                    grid_thw=_raw_thw.cpu(),
+                                    reasoning_ids=_raw_tok['input_ids'].cpu(),
+                                    reasoning_mask=_raw_tok['attention_mask'].cpu(),
+                                    image_idx=len(all_images[uuid]),  # 0-based index after append
+                                )
+                            except Exception as _e:
+                                print(f"[PathB] store failed: {_e}")
                         if do_dump:
                             proc_img.save(targetpath)
                             print('dumped', targetpath)
@@ -2792,13 +2817,28 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             action_mask = action_mask.to(device)
             na_each = [x.sum().item() for x in action_mask]
 
+            # Path B: attach reenc tensors to visual_inputs so they travel through
+            # the experience pipeline and arrive in training_step_actor.
+            _reenc_store = getattr(self, '_reenc_store', {})
+            for _buuid in batch_uuids:
+                if _buuid in _reenc_store:
+                    _rd = _reenc_store.pop(_buuid)
+                    if visual_inputs is not None:
+                        visual_inputs['reenc_pixel_values']  = _rd['pixel_values']
+                        visual_inputs['reenc_grid_thw']      = _rd['grid_thw']
+                        visual_inputs['reenc_reasoning_ids'] = _rd['reasoning_ids']
+                        visual_inputs['reenc_reasoning_mask']= _rd['reasoning_mask']
+                        visual_inputs['reenc_image_idx']     = torch.tensor(
+                            [_rd['image_idx']], dtype=torch.long
+                        )
+
             samples_list.append(
                 Samples(
                     sequences=sequences,
                     attention_mask=attention_mask,
                     action_mask=action_mask,
                     num_actions=max_output_len,
-                    na_each=na_each, 
+                    na_each=na_each,
                     packed_seq_lens=None,
                     response_length=action_mask.float().sum(dim=-1),
                     total_length=attention_mask.float().sum(dim=-1),

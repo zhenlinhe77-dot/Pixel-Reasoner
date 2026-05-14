@@ -666,6 +666,79 @@ class PPOTrainer(ABC):
             waits = experience.info['round1_nwait']
                 
         print(f"!!!!!!!!! ++++++ already inside training")
+
+        # ── PATH B: recompute conditioned_vit with gradients ──────────────────
+        # If the experience has reenc_* data (stored by experience_maker when
+        # reencode was triggered), we:
+        #   1. Call conditioner.encode_for_llm() with grads ON → conditioned_features
+        #   2. Register a forward hook on model.visual that splices conditioned_features
+        #      into the frozen ViT output at the re-encoded image's patch positions
+        #   3. Run actor forward normally — gradients flow through conditioned_features
+        #      back into the adapter weights
+        #   4. Remove hook immediately after forward (only needed for forward pass)
+        # conditioner_optim.step() in ppo_actor.py then applies the adapter gradients.
+        _pathb_hook = None
+        _conditioner = getattr(getattr(self, 'experience_maker', None), 'conditioner', None)
+
+        if (_conditioner is not None
+                and hasattr(_conditioner, 'encode_for_llm')
+                and visual_inputs is not None
+                and 'reenc_pixel_values' in visual_inputs):
+
+            _device = sequences.device if not isinstance(sequences, list) else sequences[0].device
+            _dtype  = next(_conditioner.parameters()).dtype
+
+            _pv  = visual_inputs.pop('reenc_pixel_values').to(_device, _dtype)
+            _thw = visual_inputs.pop('reenc_grid_thw').to(_device)
+            _rid = visual_inputs.pop('reenc_reasoning_ids').to(_device)
+            _rmk = visual_inputs.pop('reenc_reasoning_mask').to(_device)
+            _img_idx = int(visual_inputs.pop('reenc_image_idx').item())
+
+            # Compute patch_start / patch_end inside the concatenated model.visual output.
+            # image_grid_thw rows: (T, H, W); merged patches per image = T*H*W // 4
+            _igt = visual_inputs.get('image_grid_thw')
+            if _igt is not None and _igt.shape[0] > _img_idx:
+                _merged = _igt[:, 0] * _igt[:, 1] * _igt[:, 2] // 4
+                _ps = int(_merged[:_img_idx].sum().item())
+                _pe = _ps + int(_merged[_img_idx].item())
+            else:
+                _ps, _pe = 0, 0
+
+            if _pe > _ps:
+                _conditioner.conditioned_vit.train()
+                _cf = _conditioner.encode_for_llm(_pv, _thw, _rid, _rmk)
+                # _cf: (N_merged, 3584) with gradient through adapter layers
+
+                _snap_ps, _snap_pe, _snap_cf = _ps, _pe, _cf
+
+                def _splice_hook(module, inp, out):
+                    if _snap_cf.shape[0] != _snap_pe - _snap_ps or _snap_pe > out.shape[0]:
+                        return out
+                    return torch.cat([
+                        out[:_snap_ps].detach(),
+                        _snap_cf,
+                        out[_snap_pe:].detach(),
+                    ], dim=0)
+
+                # Locate model.visual through DeepSpeed / LoRA wrappers
+                _vmod = None
+                for _attr in ('model.visual', 'module.model.visual',
+                              'base_model.model.visual', 'module.module.model.visual'):
+                    try:
+                        _m = self.actor
+                        for _part in _attr.split('.'):
+                            _m = getattr(_m, _part)
+                        _vmod = _m
+                        break
+                    except AttributeError:
+                        pass
+
+                if _vmod is not None:
+                    _pathb_hook = _vmod.register_forward_hook(_splice_hook)
+                else:
+                    print("[PathB] WARNING: could not locate model.visual — hook not registered")
+        # ── END PATH B SETUP ──────────────────────────────────────────────────
+
         # actor loss
         action_log_probs, output = self.actor(
             sequences, # left padded
@@ -675,6 +748,10 @@ class PPOTrainer(ABC):
             packed_seq_lens=packed_seq_lens,
             visual_inputs=visual_inputs
         )
+
+        # Hook only needed for forward pass; remove before backward
+        if _pathb_hook is not None:
+            _pathb_hook.remove()
         action_entropy = output['action_entropy']
         # loss function
         self.iter += 1

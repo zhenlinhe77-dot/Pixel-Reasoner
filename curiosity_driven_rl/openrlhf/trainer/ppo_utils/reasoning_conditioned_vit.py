@@ -648,6 +648,29 @@ class ReasoningConditionerV2(nn.Module):
         grid_thw = inputs['image_grid_thw'].to(self.device)
         return pixel_values, grid_thw
 
+    def encode_for_llm(
+        self,
+        pixel_values: torch.Tensor,
+        grid_thw: torch.Tensor,
+        reasoning_ids: torch.Tensor,
+        reasoning_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Path B: run ConditionedViT and return features in LLM-ready shape.
+        No FeatureDecoder, no PIL round-trip.
+        Gradients flow through adapter layers and reasoning encoder.
+
+        Returns: (N_merged, 3584) — same shape/order as model.visual(pixel_values, grid_thw).
+        Call this inside training_step_actor (with grads enabled) so PPO loss
+        can backprop into the adapter weights.
+        """
+        return self.conditioned_vit(
+            pixel_values=pixel_values,
+            grid_thw=grid_thw,
+            reasoning_input_ids=reasoning_ids,
+            reasoning_attention_mask=reasoning_mask,
+        )
+
     def get_trainable_parameters(self):
         """All trainable parameters: adapters + encoder + decoder."""
         params = list(self.conditioned_vit.get_trainable_parameters())
