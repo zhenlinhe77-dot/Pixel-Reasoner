@@ -1699,7 +1699,10 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         )
         visual_inputs_cpu = None
         if visual_inputs is not None:
-            visual_inputs_cpu = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in visual_inputs.items()}        
+            _REENC_KEYS = ('reenc_pixel_values', 'reenc_grid_thw',
+                           'reenc_reasoning_ids', 'reenc_reasoning_mask', 'reenc_image_idx')
+            visual_inputs_cpu = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                                 for k, v in visual_inputs.items() if k not in _REENC_KEYS}
         # init log probs
         if self.initial_model is not None:
             base_action_log_probs_ref = self.initial_model.forward.remote(
