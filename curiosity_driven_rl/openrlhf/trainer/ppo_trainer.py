@@ -678,21 +678,29 @@ class PPOTrainer(ABC):
         #   4. Remove hook immediately after forward (only needed for forward pass)
         # conditioner_optim.step() in ppo_actor.py then applies the adapter gradients.
         _pathb_hook = None
+
+        # Always pop reenc_* keys so they never reach model.forward() as unexpected kwargs.
+        # Do this unconditionally before any conditioner check.
+        _reenc_pv  = visual_inputs.pop('reenc_pixel_values',  None) if visual_inputs else None
+        _reenc_thw = visual_inputs.pop('reenc_grid_thw',       None) if visual_inputs else None
+        _reenc_rid = visual_inputs.pop('reenc_reasoning_ids',  None) if visual_inputs else None
+        _reenc_rmk = visual_inputs.pop('reenc_reasoning_mask', None) if visual_inputs else None
+        _reenc_idx = visual_inputs.pop('reenc_image_idx',      None) if visual_inputs else None
+
         _conditioner = getattr(getattr(self, 'experience_maker', None), 'conditioner', None)
 
         if (_conditioner is not None
                 and hasattr(_conditioner, 'encode_for_llm')
-                and visual_inputs is not None
-                and 'reenc_pixel_values' in visual_inputs):
+                and _reenc_pv is not None):
 
             _device = sequences.device if not isinstance(sequences, list) else sequences[0].device
             _dtype  = next(_conditioner.parameters()).dtype
 
-            _pv  = visual_inputs.pop('reenc_pixel_values').to(_device, _dtype)
-            _thw = visual_inputs.pop('reenc_grid_thw').to(_device)
-            _rid = visual_inputs.pop('reenc_reasoning_ids').to(_device)
-            _rmk = visual_inputs.pop('reenc_reasoning_mask').to(_device)
-            _img_idx = int(visual_inputs.pop('reenc_image_idx').item())
+            _pv  = _reenc_pv.to(_device, _dtype)
+            _thw = _reenc_thw.to(_device)
+            _rid = _reenc_rid.to(_device)
+            _rmk = _reenc_rmk.to(_device)
+            _img_idx = int(_reenc_idx.item())
 
             # Compute patch_start / patch_end inside the concatenated model.visual output.
             # image_grid_thw rows: (T, H, W); merged patches per image = T*H*W // 4
