@@ -29,6 +29,35 @@ import json
 import shutil
 
 
+def _get_sync_master_addr() -> str:
+    """Return the IP to use for the actor↔vLLM TCPStore rendezvous.
+
+    On multi-node clusters the management-network IP returned by
+    ray.get_node_ip_address() is often firewalled for arbitrary ports.
+    Prefer the interface named by GLOO_SOCKET_IFNAME (e.g. hsn0 on DeltaAI)
+    which is the HPC fabric already opened for Gloo transport.
+    Fall back to Ray's IP if the interface lookup fails.
+    """
+    import fcntl, struct
+    iface = os.environ.get("GLOO_SOCKET_IFNAME") or os.environ.get("NCCL_SOCKET_IFNAME", "")
+    iface = iface.strip()
+    if iface:
+        for candidate in [iface, iface + "0"]:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                ip = socket.inet_ntoa(fcntl.ioctl(
+                    s.fileno(), 0x8915,
+                    struct.pack("256s", candidate[:15].encode())
+                )[20:24])
+                print(f"[sync] Using {candidate} IP {ip} for vLLM weight-sync TCPStore")
+                return ip
+            except Exception:
+                pass
+    fallback = ray._private.services.get_node_ip_address()
+    print(f"[sync] Falling back to Ray node IP {fallback} for vLLM weight-sync TCPStore")
+    return fallback
+
+
 class ActorPPOTrainer(PPOTrainer):
     def __init__(
         self,
@@ -91,7 +120,7 @@ class ActorPPOTrainer(PPOTrainer):
         #   1. AllGather paramters to rank 0
         #   2. Broadcast parameters from rank 0 to all vllm engines
         if self.vllm_engines is not None and not self.use_cuda_ipc and torch.distributed.get_rank() == 0:
-            master_address = ray._private.services.get_node_ip_address()
+            master_address = _get_sync_master_addr()
             with socket.socket() as sock:
                 sock.bind(("", 0))
                 master_port = sock.getsockname()[1]
