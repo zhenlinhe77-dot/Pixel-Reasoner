@@ -191,15 +191,20 @@ class PPORayActorGroup:
     def _initiate_actors(self, pg, num_gpus_per_actor):
         world_size = self._num_nodes * self._num_gpus_per_node
         print(f'!!!! [config] worldsize={world_size}, num_nodes={self._num_nodes}, num_gpus_per_node={self._num_gpus_per_node}, placementgroup={pg}')
-        # Use placement group to lock resources for models of same type
-        if self._num_gpus_per_node > 1 and pg is None:
+        # Use placement group to lock resources for models of same type.
+        # SPREAD across nodes when num_nodes > 1 so each actor rank lands on a
+        # different node (without this, Ray packs all actors onto the head node
+        # when num_gpus_per_node == 1, defeating multi-node ZeRO-3).
+        # PACK for single-node multi-GPU to keep the group together.
+        if (self._num_gpus_per_node > 1 or self._num_nodes > 1) and pg is None:
             bundles = [{"GPU": 1, "CPU": 1} for _ in range(self._num_nodes * self._num_gpus_per_node)]
             if self._resources:
                 resources_name = list(self._resources.keys())[0]
                 for i in range(len(bundles)):
                     bundles[i][resources_name] = self._num_resources_per_node
 
-            pg = placement_group(bundles, strategy="PACK")
+            strategy = "SPREAD" if self._num_nodes > 1 else "PACK"
+            pg = placement_group(bundles, strategy=strategy)
             ray.get(pg.ready())
         if pg:
             print(f'!!!! [config] worldsize={world_size}, num_nodes={self._num_nodes}, num_gpus_per_node={self._num_gpus_per_node}, placementgroup={pg}, num_gpus_per_actor={num_gpus_per_actor}')
