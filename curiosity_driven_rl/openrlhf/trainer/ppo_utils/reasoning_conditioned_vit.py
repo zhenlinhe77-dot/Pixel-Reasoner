@@ -43,6 +43,7 @@ Qwen2.5-VL ViT specifics:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as grad_ckpt
 from typing import Optional, Tuple
 from PIL import Image
 import numpy as np
@@ -409,25 +410,34 @@ class ConditionedViT(nn.Module):
         fullatt_block_indexes = set(self.vit.fullatt_block_indexes)
 
         # Step 3: Block loop with adapter injection.
-        # Frozen blocks run WITHOUT torch.no_grad() so that adapter residuals stay
-        # connected to the autograd graph all the way to the final output.
-        # The blocks' own parameters have requires_grad=False and will not accumulate
-        # gradients; only the adapter gate/weights and reasoning_encoder are updated.
+        # Gradient checkpointing per block: recompute activations during backward
+        # instead of storing all 32 blocks' Q/K/V/FFN tensors. Reduces ViT activation
+        # memory by ~32x at the cost of one extra forward pass per block during backward.
         for idx, block in enumerate(self.vit.blocks):
-            pre_block_features = (
-                x.detach() if idx in self.inject_at and adapter_prompts is not None else None
-            )
-
             this_cu_seqlens = cu_seqlens if idx in fullatt_block_indexes else cu_window_seqlens
 
-            x = block(x, cu_seqlens=this_cu_seqlens, position_embeddings=position_embeddings)
-
             if idx in self.inject_at and adapter_prompts is not None:
-                x = self.adapter_layers[str(idx)](
-                    visual_features=pre_block_features,
-                    adapter_features=adapter_prompts,
-                    original_block_output=x,
-                )
+                pre_block_features = x.detach()
+                adp_layer = self.adapter_layers[str(idx)]
+
+                # Default-arg capture binds all loop variables correctly per iteration.
+                def _fwd_with_adapter(
+                    x_,
+                    _blk=block, _cu=this_cu_seqlens, _pe=position_embeddings,
+                    _pre=pre_block_features, _adp=adapter_prompts, _adl=adp_layer,
+                ):
+                    out = _blk(x_, cu_seqlens=_cu, position_embeddings=_pe)
+                    return _adl(visual_features=_pre, adapter_features=_adp, original_block_output=out)
+
+                x = grad_ckpt(_fwd_with_adapter, x, use_reentrant=False)
+            else:
+                def _fwd_block(
+                    x_,
+                    _blk=block, _cu=this_cu_seqlens, _pe=position_embeddings,
+                ):
+                    return _blk(x_, cu_seqlens=_cu, position_embeddings=_pe)
+
+                x = grad_ckpt(_fwd_block, x, use_reentrant=False)
 
         # Step 4: Merger + reverse window ordering.
         # Run without no_grad so the adapter residuals from block 31 remain connected
