@@ -371,7 +371,9 @@ class ConditionedViT(nn.Module):
         else:
             adapter_prompts = None
 
-        # Step 2: Frozen ViT preprocessing — replicate the real forward exactly
+        # Step 2: Frozen ViT preprocessing — replicate the real forward exactly.
+        # Run under no_grad since patch_embed/rot_pos_emb have no adapters and
+        # we don't need their activations in the backward graph.
         with torch.no_grad():
             x = self.vit.patch_embed(pixel_values)
             rotary_pos_emb = self.vit.rot_pos_emb(grid_thw)
@@ -401,18 +403,24 @@ class ConditionedViT(nn.Module):
             ).cumsum(dim=0, dtype=torch.int32)
             cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
+        # Detach from the no_grad preprocessing; gradient only enters via adapters.
+        x = x.detach()
+
         fullatt_block_indexes = set(self.vit.fullatt_block_indexes)
 
-        # Step 3: Block loop with adapter injection
+        # Step 3: Block loop with adapter injection.
+        # Frozen blocks run WITHOUT torch.no_grad() so that adapter residuals stay
+        # connected to the autograd graph all the way to the final output.
+        # The blocks' own parameters have requires_grad=False and will not accumulate
+        # gradients; only the adapter gate/weights and reasoning_encoder are updated.
         for idx, block in enumerate(self.vit.blocks):
             pre_block_features = (
-                x.clone() if idx in self.inject_at and adapter_prompts is not None else None
+                x.detach() if idx in self.inject_at and adapter_prompts is not None else None
             )
 
             this_cu_seqlens = cu_seqlens if idx in fullatt_block_indexes else cu_window_seqlens
 
-            with torch.no_grad():
-                x = block(x, cu_seqlens=this_cu_seqlens, position_embeddings=position_embeddings)
+            x = block(x, cu_seqlens=this_cu_seqlens, position_embeddings=position_embeddings)
 
             if idx in self.inject_at and adapter_prompts is not None:
                 x = self.adapter_layers[str(idx)](
@@ -421,11 +429,12 @@ class ConditionedViT(nn.Module):
                     original_block_output=x,
                 )
 
-        # Step 4: Merger + reverse window ordering (frozen)
-        with torch.no_grad():
-            x = self.vit.merger(x)
-            reverse_indices = torch.argsort(window_index)
-            x = x[reverse_indices, :]
+        # Step 4: Merger + reverse window ordering.
+        # Run without no_grad so the adapter residuals from block 31 remain connected
+        # to the autograd graph and gate gradients can flow from the PPO loss.
+        x = self.vit.merger(x)
+        reverse_indices = torch.argsort(window_index)
+        x = x[reverse_indices, :]
 
         return x
 
