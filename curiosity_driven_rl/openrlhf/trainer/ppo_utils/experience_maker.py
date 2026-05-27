@@ -2392,6 +2392,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     else:
                         mtoken = maxtokens[out_idx]
                         proc_img = resize_cropped(raw_result, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
+                        print(f"[PathB] tool={tool_name} conditioner_is_live={conditioner_is_live}")
                         if conditioner_is_live and reasoning_so_far is not None:
                             proc_img = self.conditioner.process(proc_img, focus_hint="", reasoning_history=reasoning_so_far)
                             # Path B: store raw (pre-conditioning) inputs so training_step_actor
@@ -2417,6 +2418,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                                     reasoning_mask=_raw_tok['attention_mask'].cpu(),
                                     image_idx=len(all_images[uuid]),  # 0-based index after append
                                 )
+                                print(f"[PathB] stored reenc data for uuid={uuid}, patches={_raw_pv.shape[0]}, image_idx={len(all_images[uuid])}")
                             except Exception as _e:
                                 print(f"[PathB] store failed: {_e}")
                         if do_dump:
@@ -2834,6 +2836,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                         visual_inputs['reenc_image_idx']     = torch.tensor(
                             [_rd['image_idx']], dtype=torch.long
                         )
+                        print(f"[PathB] attached reenc to experience uuid={_buuid}")
 
             samples_list.append(
                 Samples(
