@@ -724,37 +724,50 @@ class PPOTrainer(ABC):
 
             if _pe > _ps:
                 _conditioner.conditioned_vit.train()
-                _cf = _conditioner.encode_for_llm(_pv, _thw, _rid, _rmk)
-                # _cf: (N_merged, 3584) with gradient through adapter layers
-
-                _snap_ps, _snap_pe, _snap_cf = _ps, _pe, _cf
-
-                def _splice_hook(module, inp, out):
-                    if _snap_cf.shape[0] != _snap_pe - _snap_ps or _snap_pe > out.shape[0]:
-                        return out
-                    return torch.cat([
-                        out[:_snap_ps].detach(),
-                        _snap_cf,
-                        out[_snap_pe:].detach(),
-                    ], dim=0)
-
-                # Locate model.visual through DeepSpeed / LoRA wrappers
-                _vmod = None
-                for _attr in ('model.visual', 'module.model.visual',
-                              'base_model.model.visual', 'module.module.model.visual'):
-                    try:
-                        _m = self.actor
-                        for _part in _attr.split('.'):
-                            _m = getattr(_m, _part)
-                        _vmod = _m
-                        break
-                    except AttributeError:
-                        pass
-
-                if _vmod is not None:
-                    _pathb_hook = _vmod.register_forward_hook(_splice_hook)
+                _n_patches = int(_pv.shape[0])
+                _MAX_PATCHES = 2048
+                _cf = None
+                if _n_patches > _MAX_PATCHES:
+                    print(f"[PathB] skipping encode_for_llm: {_n_patches} patches > {_MAX_PATCHES} limit")
+                    _pe = 0
                 else:
-                    print("[PathB] WARNING: could not locate model.visual — hook not registered")
+                    try:
+                        _cf = _conditioner.encode_for_llm(_pv, _thw, _rid, _rmk)
+                    except torch.cuda.OutOfMemoryError:
+                        print(f"[PathB] OOM in encode_for_llm ({_n_patches} patches), skipping")
+                        torch.cuda.empty_cache()
+                        _pe = 0
+
+                if _cf is not None:
+                    # _cf: (N_merged, 3584) with gradient through adapter layers
+                    _snap_ps, _snap_pe, _snap_cf = _ps, _pe, _cf
+
+                    def _splice_hook(module, inp, out):
+                        if _snap_cf.shape[0] != _snap_pe - _snap_ps or _snap_pe > out.shape[0]:
+                            return out
+                        return torch.cat([
+                            out[:_snap_ps].detach(),
+                            _snap_cf,
+                            out[_snap_pe:].detach(),
+                        ], dim=0)
+
+                    # Locate model.visual through DeepSpeed / LoRA wrappers
+                    _vmod = None
+                    for _attr in ('model.visual', 'module.model.visual',
+                                  'base_model.model.visual', 'module.module.model.visual'):
+                        try:
+                            _m = self.actor
+                            for _part in _attr.split('.'):
+                                _m = getattr(_m, _part)
+                            _vmod = _m
+                            break
+                        except AttributeError:
+                            pass
+
+                    if _vmod is not None:
+                        _pathb_hook = _vmod.register_forward_hook(_splice_hook)
+                    else:
+                        print("[PathB] WARNING: could not locate model.visual — hook not registered")
         # ── END PATH B SETUP ──────────────────────────────────────────────────
 
         # actor loss
