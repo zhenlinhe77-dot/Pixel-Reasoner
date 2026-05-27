@@ -704,6 +704,15 @@ class PPOTrainer(ABC):
 
         _conditioner = getattr(getattr(self, 'experience_maker', None), 'conditioner', None)
 
+        # Skip PathB entirely for long sequences — on GH200 unified memory the OS OOM
+        # killer fires before PyTorch can raise OutOfMemoryError, so we must prevent
+        # the spike rather than catch it.
+        _seq_len = sequences.shape[-1] if sequences is not None and hasattr(sequences, 'shape') else 0
+        _PATHB_MAX_SEQ = 2048
+        if _reenc_pv is not None and _seq_len > _PATHB_MAX_SEQ:
+            print(f"[PathB] skipping: seq_len={_seq_len} > {_PATHB_MAX_SEQ}")
+            _reenc_pv = None
+
         if (_conditioner is not None
                 and hasattr(_conditioner, 'encode_for_llm')
                 and _reenc_pv is not None):
@@ -730,7 +739,7 @@ class PPOTrainer(ABC):
             if _pe > _ps:
                 _conditioner.conditioned_vit.train()
                 _n_patches = int(_pv.shape[0])
-                _MAX_PATCHES = 2048
+                _MAX_PATCHES = 1024
                 _cf = None
                 if _n_patches > _MAX_PATCHES:
                     print(f"[PathB] skipping encode_for_llm: {_n_patches} patches > {_MAX_PATCHES} limit")
