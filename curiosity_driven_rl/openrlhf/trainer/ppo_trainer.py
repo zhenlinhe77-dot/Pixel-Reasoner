@@ -619,6 +619,16 @@ class PPOTrainer(ABC):
             status = self.training_step_actor(experience, **kwargs)
         if self.critic is not None:
             status.update(self.training_step_critic(experience))
+        if getattr(self, 'conditioner_optim', None) is not None:
+            _cond = getattr(getattr(self, 'experience_maker', None), 'conditioner', None)
+            if _cond is not None and hasattr(_cond, 'conditioned_vit') and global_steps % 5 == 0:
+                for _bn, _layer in _cond.conditioned_vit.adapter_layers.items():
+                    _g = _layer.gate.grad
+                    _g_str = f"{_g.item():.4e}" if _g is not None else "None"
+                    print(f"[gate grad] step={global_steps} block={_bn}: "
+                          f"gate_raw={_layer.gate.item():.4e}  grad={_g_str}")
+            self.conditioner_optim.step()
+            self.conditioner_optim.zero_grad()
         return status
 
     def training_step_actor(self, experience: Experience, **kwargs) -> Dict[str, float]:
