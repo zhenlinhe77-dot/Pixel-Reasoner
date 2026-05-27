@@ -616,7 +616,12 @@ class PPOTrainer(ABC):
         status = {}
         kwargs['global_steps'] = global_steps
         if global_steps > self.freezing_actor_steps:
-            status = self.training_step_actor(experience, **kwargs)
+            try:
+                status = self.training_step_actor(experience, **kwargs)
+            except torch.cuda.OutOfMemoryError:
+                print(f"[training_step] OOM at global_step={global_steps}, skipping batch and clearing cache")
+                torch.cuda.empty_cache()
+                status = {}
         if self.critic is not None:
             status.update(self.training_step_critic(experience))
         if getattr(self, 'conditioner_optim', None) is not None:
