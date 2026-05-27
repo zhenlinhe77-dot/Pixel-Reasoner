@@ -639,10 +639,11 @@ class ActorModelRayActor(BasePPORole):
                         print(f"[ConditionedViT] Loaded conditioner from {conditioner_path}")
             conditioner_params = trainer.experience_maker.conditioner.get_trainable_parameters()
             if conditioner_params:
+                conditioner_lr = 1e-4
                 trainer.conditioner_optim = torch.optim.AdamW(
-                    conditioner_params, lr=args.actor_learning_rate * 0.1
+                    conditioner_params, lr=conditioner_lr
                 )
-                print(f"[ConditionedViT] Conditioner optimizer: AdamW lr={args.actor_learning_rate * 0.1:.2e}, "
+                print(f"[ConditionedViT] Conditioner optimizer: AdamW lr={conditioner_lr:.2e}, "
                       f"params={sum(p.numel() for p in conditioner_params):,}")
 
         print(f"===> [verbose] trainer.fit()")
