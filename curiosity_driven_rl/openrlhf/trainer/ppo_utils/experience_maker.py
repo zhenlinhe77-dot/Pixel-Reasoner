@@ -1560,6 +1560,9 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         
         experiences = []
         nsample = 1 if is_eval else args.n_samples_per_prompt
+        # Free allocator-cached memory from generate_samples() (conditioner.process()
+        # calls accumulate blocks) before the actor forward passes in the tqdm loop.
+        torch.cuda.empty_cache()
         print(f"===> [verbose] all synced. REMaker get_experience(): single experience is arranged as {args.micro_rollout_batch_size} qas, and nsample={nsample}")
         for batched_sample in tqdm(samples_list):
             # breakpoint()
