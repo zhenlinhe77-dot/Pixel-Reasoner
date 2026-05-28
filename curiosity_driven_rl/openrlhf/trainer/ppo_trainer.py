@@ -704,14 +704,7 @@ class PPOTrainer(ABC):
 
         _conditioner = getattr(getattr(self, 'experience_maker', None), 'conditioner', None)
 
-        # Skip PathB entirely for long sequences — on GH200 unified memory the OS OOM
-        # killer fires before PyTorch can raise OutOfMemoryError, so we must prevent
-        # the spike rather than catch it.
         _seq_len = sequences.shape[-1] if sequences is not None and hasattr(sequences, 'shape') else 0
-        _PATHB_MAX_SEQ = 2048
-        if _reenc_pv is not None and _seq_len > _PATHB_MAX_SEQ:
-            print(f"[PathB] skipping: seq_len={_seq_len} > {_PATHB_MAX_SEQ}")
-            _reenc_pv = None
 
         if (_conditioner is not None
                 and hasattr(_conditioner, 'encode_for_llm')
@@ -742,13 +735,15 @@ class PPOTrainer(ABC):
                 _MAX_PATCHES = 1024
                 _cf = None
                 if _n_patches > _MAX_PATCHES:
-                    print(f"[PathB] skipping encode_for_llm: {_n_patches} patches > {_MAX_PATCHES} limit")
+                    print(f"[PathB-train] skipping encode_for_llm: {_n_patches} patches > {_MAX_PATCHES} limit")
                     _pe = 0
                 else:
                     try:
+                        print(f"[PathB-train] calling encode_for_llm patches={_n_patches} seq={_seq_len}")
                         _cf = _conditioner.encode_for_llm(_pv, _thw, _rid, _rmk)
+                        print(f"[PathB-train] encode_for_llm ok cf.shape={_cf.shape} cf.requires_grad={_cf.requires_grad}")
                     except torch.cuda.OutOfMemoryError:
-                        print(f"[PathB] OOM in encode_for_llm ({_n_patches} patches), skipping")
+                        print(f"[PathB-train] OOM in encode_for_llm ({_n_patches} patches), skipping")
                         torch.cuda.empty_cache()
                         _pe = 0
 
@@ -767,6 +762,7 @@ class PPOTrainer(ABC):
 
                     # Locate model.visual through DeepSpeed / LoRA wrappers
                     _vmod = None
+                    _found_attr = None
                     for _attr in ('model.visual', 'module.model.visual',
                                   'base_model.model.visual', 'module.module.model.visual'):
                         try:
@@ -774,14 +770,16 @@ class PPOTrainer(ABC):
                             for _part in _attr.split('.'):
                                 _m = getattr(_m, _part)
                             _vmod = _m
+                            _found_attr = _attr
                             break
                         except AttributeError:
                             pass
 
                     if _vmod is not None:
                         _pathb_hook = _vmod.register_forward_hook(_splice_hook)
+                        print(f"[PathB-train] hook registered on actor.{_found_attr} ps={_ps} pe={_pe}")
                     else:
-                        print("[PathB] WARNING: could not locate model.visual — hook not registered")
+                        print("[PathB-train] WARNING: could not locate model.visual — hook not registered")
         # ── END PATH B SETUP ──────────────────────────────────────────────────
 
         # actor loss
@@ -829,8 +827,15 @@ class PPOTrainer(ABC):
             loss = actor_loss + aux_loss * self.args.aux_loss_coef + kl_penalty_coef*actor_loss_dict.get("kl_penalty",0.0) + self.args.entropy_loss_coef * entropy_loss
             print('!!!! [training] iter', self.iter, f'actorloss={actor_loss.item()}, sftloss={aux_loss if isinstance(aux_loss,float) else aux_loss.item()}, final={loss.item()}, reward={experience.info["reward"]}, adv={advlist}, waits={experience.info["round1_nwait"]}, val={experience.validity}')
             
-        if not skip: 
+        if not skip:
             self.strategy.backward(loss, self.actor, self.actor_optim)
+            # Verify PathB gradient flow when PathB was active this step
+            if _cf is not None and _conditioner is not None and hasattr(_conditioner, 'conditioned_vit'):
+                _gate_grads = {}
+                for _bn, _layer in _conditioner.conditioned_vit.adapter_layers.items():
+                    _g = _layer.gate.grad
+                    _gate_grads[_bn] = f"{_g.item():.4e}" if _g is not None else "None"
+                print(f"[PathB-train] post-bwd gate grads: {_gate_grads}")
         del action_entropy
         # ptx loss
         ptx_loss = None
