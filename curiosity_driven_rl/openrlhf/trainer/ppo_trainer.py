@@ -703,6 +703,7 @@ class PPOTrainer(ABC):
         _reenc_idx = visual_inputs.pop('reenc_image_idx',      None) if visual_inputs else None
 
         _conditioner = getattr(getattr(self, 'experience_maker', None), 'conditioner', None)
+        _cf = None  # set inside PathB block; referenced in post-backward check
 
         _seq_len = sequences.shape[-1] if sequences is not None and hasattr(sequences, 'shape') else 0
 
