@@ -707,8 +707,13 @@ class PPOTrainer(ABC):
         _reenc_rid = _unwrap_reenc(visual_inputs.pop('reenc_reasoning_ids',  None) if visual_inputs else None)
         _reenc_rmk = _unwrap_reenc(visual_inputs.pop('reenc_reasoning_mask', None) if visual_inputs else None)
         _reenc_idx = _unwrap_reenc(visual_inputs.pop('reenc_image_idx',      None) if visual_inputs else None)
-        print(f"[PathB-train] reenc_pv={'tensor'+str(tuple(_reenc_pv.shape)) if _reenc_pv is not None else 'None'}"
-              f" reenc_thw={'ok' if _reenc_thw is not None else 'None'}")
+        def _tensor_info(t):
+            if t is None: return 'None'
+            if isinstance(t, torch.Tensor): return f"shape={tuple(t.shape)} dtype={t.dtype}"
+            return f"type={type(t).__name__}"
+        print(f"[PathB-train] reenc_pv={_tensor_info(_reenc_pv)}"
+              f" reenc_rid={_tensor_info(_reenc_rid)}"
+              f" reenc_rmk={_tensor_info(_reenc_rmk)}")
 
         _conditioner = getattr(getattr(self, 'experience_maker', None), 'conditioner', None)
         _cf = None  # set inside PathB block; referenced in post-backward check
@@ -724,8 +729,8 @@ class PPOTrainer(ABC):
 
             _pv  = _reenc_pv.to(_device, _dtype)
             _thw = _reenc_thw.to(_device)
-            _rid = _reenc_rid.to(_device)
-            _rmk = _reenc_rmk.to(_device)
+            _rid = _reenc_rid.to(_device).long()   # embedding requires int64
+            _rmk = _reenc_rmk.to(_device).long()
             _img_idx = int(_reenc_idx.item())
 
             # Compute patch_start / patch_end inside the concatenated model.visual output.
