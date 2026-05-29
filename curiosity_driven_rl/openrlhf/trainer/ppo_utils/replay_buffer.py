@@ -23,6 +23,13 @@ common_keys = (
         "validity"
     )
 
+# Keys injected by PathB that data_processor doesn't know about — must be
+# extracted before split_input_batch / make_input_batch and re-attached after.
+_REENC_KEYS = (
+    'reenc_pixel_values', 'reenc_grid_thw',
+    'reenc_reasoning_ids', 'reenc_reasoning_mask', 'reenc_image_idx',
+)
+
 @dataclass
 class BufferItem:
     """BufferItem is an item of experience data.
@@ -70,9 +77,16 @@ def split_experience_batch(experience: Experience, data_processor: Optional[Base
             batch_kwargs[i][key] = v
     if data_processor is not None:
         visual_inputs_batch = experience.visual_inputs
+        # PathB injects reenc_* keys that data_processor.split_input_batch doesn't
+        # handle — extract them first and re-attach after the split.
+        reenc_data = {}
+        if visual_inputs_batch is not None:
+            for _k in _REENC_KEYS:
+                if _k in visual_inputs_batch:
+                    reenc_data[_k] = visual_inputs_batch.pop(_k)
         visual_inputs_batch['input_ids'] = experience.sequences
         visual_inputs_chunks = data_processor.split_input_batch(visual_inputs_batch)
-        # used some techniques to identify troublesome examples 
+        # used some techniques to identify troublesome examples
         last_valid_placeholder = None
         for idx, entry in enumerate(visual_inputs_chunks):
             if entry is None:
@@ -80,14 +94,20 @@ def split_experience_batch(experience: Experience, data_processor: Optional[Base
             elif entry['input_ids'] is None:
                 flags[idx] = True
             else:
-                last_valid_placeholder = entry 
+                last_valid_placeholder = entry
         for idx, flag in enumerate(flags):
             if flag:
                 visual_inputs_chunks[idx] = last_valid_placeholder
         # Note: if all entries are invalid, there will be bug
         for i, visual_inputs in enumerate(visual_inputs_chunks):
-            if visual_inputs is None or 'input_ids' not in visual_inputs: continue 
+            if visual_inputs is None or 'input_ids' not in visual_inputs: continue
             visual_inputs.pop('input_ids')
+            # Re-attach reenc data to this item's visual_inputs.
+            # With micro_rollout_batch_size=1 there is only 1 item so the tensor
+            # belongs to it directly; with larger batches the same reference is
+            # shared but PathB processing is already single-item.
+            for _k, _v in reenc_data.items():
+                visual_inputs[_k] = _v
             batch_kwargs[i]["visual_inputs"] = visual_inputs
     else:
         for i in range(batch_size):
@@ -169,7 +189,29 @@ def make_experience_batch(items: List[BufferItem], data_processor: Optional[Base
         
         kwargs["info"][key] = vals
     if data_processor is not None:
-        kwargs["visual_inputs"] = data_processor.make_input_batch([item.visual_inputs for item in items])
+        # PathB injects reenc_* keys that data_processor.make_input_batch doesn't
+        # handle (raises ValueError for unknown keys).  Build cleaned copies without
+        # those keys, collect them as per-item lists, then re-attach afterwards.
+        reenc_lists = {k: [] for k in _REENC_KEYS}
+        has_reenc = False
+        stripped_vis = []
+        for item in items:
+            vi = item.visual_inputs
+            for _k in _REENC_KEYS:
+                _v = vi.get(_k) if vi else None
+                reenc_lists[_k].append(_v)
+                if _v is not None:
+                    has_reenc = True
+            stripped_vis.append(
+                {k2: v2 for k2, v2 in vi.items() if k2 not in _REENC_KEYS}
+                if vi else None
+            )
+        vis_batch = data_processor.make_input_batch(stripped_vis)
+        if has_reenc:
+            for _k, _vals in reenc_lists.items():
+                if any(v is not None for v in _vals):
+                    vis_batch[_k] = _vals  # list[Optional[Tensor]], one per item
+        kwargs["visual_inputs"] = vis_batch
     return Experience(**kwargs)
 
 

@@ -696,11 +696,19 @@ class PPOTrainer(ABC):
 
         # Always pop reenc_* keys so they never reach model.forward() as unexpected kwargs.
         # Do this unconditionally before any conditioner check.
-        _reenc_pv  = visual_inputs.pop('reenc_pixel_values',  None) if visual_inputs else None
-        _reenc_thw = visual_inputs.pop('reenc_grid_thw',       None) if visual_inputs else None
-        _reenc_rid = visual_inputs.pop('reenc_reasoning_ids',  None) if visual_inputs else None
-        _reenc_rmk = visual_inputs.pop('reenc_reasoning_mask', None) if visual_inputs else None
-        _reenc_idx = visual_inputs.pop('reenc_image_idx',      None) if visual_inputs else None
+        # make_experience_batch stores these as list[Optional[Tensor]] (one per item in
+        # the training batch); unwrap to a single tensor by taking the first non-None entry.
+        def _unwrap_reenc(val):
+            if isinstance(val, list):
+                return next((x for x in val if x is not None), None)
+            return val
+        _reenc_pv  = _unwrap_reenc(visual_inputs.pop('reenc_pixel_values',  None) if visual_inputs else None)
+        _reenc_thw = _unwrap_reenc(visual_inputs.pop('reenc_grid_thw',       None) if visual_inputs else None)
+        _reenc_rid = _unwrap_reenc(visual_inputs.pop('reenc_reasoning_ids',  None) if visual_inputs else None)
+        _reenc_rmk = _unwrap_reenc(visual_inputs.pop('reenc_reasoning_mask', None) if visual_inputs else None)
+        _reenc_idx = _unwrap_reenc(visual_inputs.pop('reenc_image_idx',      None) if visual_inputs else None)
+        print(f"[PathB-train] reenc_pv={'tensor'+str(tuple(_reenc_pv.shape)) if _reenc_pv is not None else 'None'}"
+              f" reenc_thw={'ok' if _reenc_thw is not None else 'None'}")
 
         _conditioner = getattr(getattr(self, 'experience_maker', None), 'conditioner', None)
         _cf = None  # set inside PathB block; referenced in post-backward check
