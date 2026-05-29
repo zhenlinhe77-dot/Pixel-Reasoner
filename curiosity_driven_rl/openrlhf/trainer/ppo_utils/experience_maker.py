@@ -2404,24 +2404,33 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                             try:
                                 if not hasattr(self, '_reenc_store'):
                                     self._reenc_store = {}
-                                _raw_pv, _raw_thw = self.conditioner._preprocess_image(raw_result)
-                                _raw_tok = self.conditioner.tokenizer(
-                                    reasoning_so_far,
-                                    return_tensors="pt",
-                                    max_length=2048,
-                                    truncation=True,
-                                    padding=True,
-                                )
-                                # image_idx = position this image will occupy in all_images[uuid]
-                                # (recorded before the append that happens at line ~2428)
-                                self._reenc_store[uuid] = dict(
-                                    pixel_values=_raw_pv.cpu(),
-                                    grid_thw=_raw_thw.cpu(),
-                                    reasoning_ids=_raw_tok['input_ids'].cpu(),
-                                    reasoning_mask=_raw_tok['attention_mask'].cpu(),
-                                    image_idx=len(all_images[uuid]),  # 0-based index after append
-                                )
-                                print(f"[PathB] stored reenc data for uuid={uuid}, patches={_raw_pv.shape[0]}, image_idx={len(all_images[uuid])}")
+                                # Skip if no reasoning context yet — empty sequence
+                                # would cause TransformerEncoder to crash.
+                                if not reasoning_so_far or not reasoning_so_far.strip():
+                                    print(f"[PathB] skipping store for uuid={uuid}: empty reasoning_so_far")
+                                else:
+                                    _raw_pv, _raw_thw = self.conditioner._preprocess_image(raw_result)
+                                    _raw_tok = self.conditioner.tokenizer(
+                                        reasoning_so_far,
+                                        return_tensors="pt",
+                                        max_length=2048,
+                                        truncation=True,
+                                        padding=True,
+                                    )
+                                    _tok_len = _raw_tok['input_ids'].shape[-1]
+                                    if _tok_len == 0:
+                                        print(f"[PathB] skipping store for uuid={uuid}: tokenizer returned empty ids")
+                                    else:
+                                        # image_idx = position this image will occupy in all_images[uuid]
+                                        # (recorded before the append that happens at line ~2428)
+                                        self._reenc_store[uuid] = dict(
+                                            pixel_values=_raw_pv.cpu(),
+                                            grid_thw=_raw_thw.cpu(),
+                                            reasoning_ids=_raw_tok['input_ids'].cpu(),
+                                            reasoning_mask=_raw_tok['attention_mask'].cpu(),
+                                            image_idx=len(all_images[uuid]),  # 0-based index after append
+                                        )
+                                        print(f"[PathB] stored reenc data for uuid={uuid}, patches={_raw_pv.shape[0]}, tok_len={_tok_len}, image_idx={len(all_images[uuid])}")
                             except Exception as _e:
                                 print(f"[PathB] store failed: {_e}")
                         if do_dump:

@@ -720,9 +720,22 @@ class PPOTrainer(ABC):
 
         _seq_len = sequences.shape[-1] if sequences is not None and hasattr(sequences, 'shape') else 0
 
+        # Validate reenc tensors: skip PathB if sequence is empty or tokens missing.
+        # (Empty sequence happens when reasoning_so_far was "" at store time.)
+        _reenc_valid = (
+            _reenc_pv is not None
+            and _reenc_rid is not None
+            and isinstance(_reenc_rid, torch.Tensor)
+            and _reenc_rid.numel() > 0
+            and _reenc_rid.shape[-1] > 0
+        )
+        if not _reenc_valid and _reenc_pv is not None:
+            print(f"[PathB-train] skipping: invalid reenc_rid "
+                  f"(shape={tuple(_reenc_rid.shape) if isinstance(_reenc_rid, torch.Tensor) else type(_reenc_rid).__name__})")
+
         if (_conditioner is not None
                 and hasattr(_conditioner, 'encode_for_llm')
-                and _reenc_pv is not None):
+                and _reenc_valid):
 
             _device = sequences.device if not isinstance(sequences, list) else sequences[0].device
             _dtype  = next(_conditioner.parameters()).dtype
