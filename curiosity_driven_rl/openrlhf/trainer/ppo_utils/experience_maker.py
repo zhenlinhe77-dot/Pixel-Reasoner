@@ -2358,7 +2358,15 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                     reasoning_so_far = None
                     if tool_name == 'reencode' or conditioner_is_live:
                         reasoning_so_far = ""
+                        # Collect prior rounds from conversation history
                         for turn in all_conversations[uuid]:
+                            if turn['role'] == 'assistant':
+                                for item in turn.get('content', []):
+                                    if isinstance(item, dict) and item.get('type') == 'text':
+                                        reasoning_so_far += item['text'] + "\n"
+                        # Also include current round's reasoning — msg_this is the
+                        # current assistant turn and not yet appended to all_conversations.
+                        for turn in msg_this:
                             if turn['role'] == 'assistant':
                                 for item in turn.get('content', []):
                                     if isinstance(item, dict) and item.get('type') == 'text':
