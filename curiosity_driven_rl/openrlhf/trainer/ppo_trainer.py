@@ -809,6 +809,14 @@ class PPOTrainer(ABC):
                         print("[PathB-train] WARNING: could not locate model.visual — hook not registered")
         # ── END PATH B SETUP ──────────────────────────────────────────────────
 
+        # Barrier: ensure all ranks finish PathB encode (or skip it) before
+        # any rank enters the ZeRO-3 actor forward.  Without this, a rank
+        # that has PathB data and does encode_for_llm will still be computing
+        # while other ranks have already started allgathering actor parameters,
+        # causing a permanent NCCL hang.
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
         # actor loss
         action_log_probs, output = self.actor(
             sequences, # left padded
