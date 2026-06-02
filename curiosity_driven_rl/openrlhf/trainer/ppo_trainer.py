@@ -711,7 +711,10 @@ class PPOTrainer(ABC):
             if t is None: return 'None'
             if isinstance(t, torch.Tensor): return f"shape={tuple(t.shape)} dtype={t.dtype}"
             return f"type={type(t).__name__}"
-        print(f"[PathB-train] reenc_pv={_tensor_info(_reenc_pv)}"
+        import time as _time
+        _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
+        print(f"[PathB-train] {_time.strftime('%H:%M:%S')} rank={_rank}"
+              f" reenc_pv={_tensor_info(_reenc_pv)}"
               f" reenc_rid={_tensor_info(_reenc_rid)}"
               f" reenc_rmk={_tensor_info(_reenc_rmk)}")
 
@@ -766,9 +769,9 @@ class PPOTrainer(ABC):
                     _pe = 0
                 else:
                     try:
-                        print(f"[PathB-train] calling encode_for_llm patches={_n_patches} seq={_seq_len}")
+                        print(f"[PathB-train] {_time.strftime('%H:%M:%S')} rank={_rank} calling encode_for_llm patches={_n_patches} seq={_seq_len}")
                         _cf = _conditioner.encode_for_llm(_pv, _thw, _rid, _rmk)
-                        print(f"[PathB-train] encode_for_llm ok cf.shape={_cf.shape} cf.requires_grad={_cf.requires_grad}")
+                        print(f"[PathB-train] {_time.strftime('%H:%M:%S')} rank={_rank} encode_for_llm ok cf.shape={_cf.shape} cf.requires_grad={_cf.requires_grad}")
                     except torch.cuda.OutOfMemoryError:
                         print(f"[PathB-train] OOM in encode_for_llm ({_n_patches} patches), skipping")
                         torch.cuda.empty_cache()
@@ -814,8 +817,11 @@ class PPOTrainer(ABC):
         # that has PathB data and does encode_for_llm will still be computing
         # while other ranks have already started allgathering actor parameters,
         # causing a permanent NCCL hang.
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
+        _dist_ok = torch.distributed.is_available() and torch.distributed.is_initialized()
+        print(f"[PathB-barrier] {_time.strftime('%H:%M:%S')} rank={_rank} dist_initialized={_dist_ok} entering barrier")
+        if _dist_ok:
             torch.distributed.barrier()
+        print(f"[PathB-barrier] {_time.strftime('%H:%M:%S')} rank={_rank} passed barrier")
 
         # actor loss
         action_log_probs, output = self.actor(
