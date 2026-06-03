@@ -515,21 +515,26 @@ class FeatureDecoder(nn.Module):
             nn.Sigmoid(),
         )
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        """features: (B, N_merged, d_merged) → (B, 3, H, W)"""
+    def forward(self, features: torch.Tensor, grid_hw=None) -> torch.Tensor:
+        """features: (B, N_merged, d_merged) → (B, 3, H, W)
+        grid_hw: (n_h, n_w) merged-patch grid; inferred from N if None.
+        """
         B, N, D = features.shape
-        n = self.n_patches_per_side
+        if grid_hw is not None:
+            n_h, n_w = grid_hw
+        else:
+            n_h = n_w = self.n_patches_per_side  # fallback: assume square 448×448
 
         patches = self.proj(features)
-        patches = patches.view(B, n, n, self.patch_size, self.patch_size, 3)
+        patches = patches.view(B, n_h, n_w, self.patch_size, self.patch_size, 3)
         patches = patches.permute(0, 5, 1, 3, 2, 4).contiguous()
-        img = patches.view(B, 3, self.image_size, self.image_size)
+        img = patches.view(B, 3, n_h * self.patch_size, n_w * self.patch_size)
         img = self.refine(img)
         return img
 
-    def to_pil(self, features: torch.Tensor) -> Image.Image:
+    def to_pil(self, features: torch.Tensor, grid_hw=None) -> Image.Image:
         with torch.no_grad():
-            img_tensor = self.forward(features.unsqueeze(0))
+            img_tensor = self.forward(features.unsqueeze(0), grid_hw=grid_hw)
             img_np = (img_tensor[0].permute(1, 2, 0).float().cpu().numpy() * 255).astype(np.uint8)
             return Image.fromarray(img_np, 'RGB')
 
@@ -636,8 +641,13 @@ class ReasoningConditionerV2(nn.Module):
         )
         # conditioned_features: (N_merged, 3584) — packed, no batch dim
 
+        # grid_thw is [[t, h_patches, w_patches]]; after 2×2 spatial merger
+        # the merged grid is (h_patches//2, w_patches//2)
+        _thw = grid_thw[0]
+        grid_hw = (int(_thw[1]) // 2, int(_thw[2]) // 2)
+
         # Decode to PIL image
-        result_image = self.decoder.to_pil(conditioned_features)
+        result_image = self.decoder.to_pil(conditioned_features, grid_hw=grid_hw)
         result_image = result_image.resize(image.size, Image.LANCZOS)
 
         return result_image
