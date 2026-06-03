@@ -784,10 +784,14 @@ class PPOTrainer(ABC):
                     def _splice_hook(module, inp, out):
                         if _snap_cf.shape[0] != _snap_pe - _snap_ps or _snap_pe > out.shape[0]:
                             return out
+                        # Do NOT detach out[:ps] / out[pe:]: ZeRO-3 needs every rank
+                        # to backprop through model.visual so its per-layer ALLGATHER
+                        # fires symmetrically on all ranks.  Detaching here caused rank=3
+                        # to skip that ALLGATHER while other ranks waited → NCCL timeout.
                         return torch.cat([
-                            out[:_snap_ps].detach(),
+                            out[:_snap_ps],
                             _snap_cf,
-                            out[_snap_pe:].detach(),
+                            out[_snap_pe:],
                         ], dim=0)
 
                     # Locate model.visual through DeepSpeed / LoRA wrappers
