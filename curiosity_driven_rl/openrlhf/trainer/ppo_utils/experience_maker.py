@@ -2627,6 +2627,50 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
     
         match_results = [x[-1] for x in rets_round1]
         print(f"===> [verbose] multiturn responses toolrate={np.mean(num_toolcalls)}, acc={np.mean(match_results)}, match_results={match_results}")
+
+        # Diagnostic: dump image + full trajectory for 2 representative samples.
+        # Shows the first sample from groups 0 and 1 so we can judge task difficulty.
+        _diag_dir = "/tmp/rl_diag"
+        os.makedirs(_diag_dir, exist_ok=True)
+        nsamp = args.n_samples_per_prompt
+        _diag_uuids = [all_uids[0], all_uids[nsamp]] if len(all_uids) > nsamp else [all_uids[0]]
+        for _di, _uuid in enumerate(_diag_uuids):
+            _flat_idx = _di * nsamp
+            _group_rewards = [rets_round1[_flat_idx + k][-1] for k in range(nsamp) if _flat_idx + k < len(rets_round1)]
+            print(f"!!!! [diag] === GROUP {_di} uid={_uuid[:8]} group_rewards={_group_rewards} ===")
+            # Save original image
+            _imgs = all_raw_images.get(_uuid, [])
+            if _imgs:
+                _img_path = f"{_diag_dir}/group{_di}.png"
+                try:
+                    _img = _imgs[0]
+                    if not hasattr(_img, 'save'):
+                        from PIL import Image as _PIL
+                        _img = _PIL.fromarray(_img) if hasattr(_img, '__array__') else None
+                    if _img is not None:
+                        _img.save(_img_path)
+                        print(f"!!!! [diag]   IMAGE saved → {_img_path}  size={_imgs[0].size}  n_total_imgs={len(_imgs)}")
+                except Exception as _e:
+                    print(f"!!!! [diag]   IMAGE save failed: {_e}")
+            else:
+                print(f"!!!! [diag]   IMAGE: none available")
+            # Print full multi-turn trajectory
+            _conv = all_conversations.get(_uuid, [])
+            print(f"!!!! [diag]   TRAJECTORY ({len(_conv)} turns):")
+            for _turn in _conv:
+                _role = _turn.get('role', '?')
+                _content = _turn.get('content', '')
+                if isinstance(_content, list):
+                    _texts = [c.get('text', '') for c in _content if isinstance(c, dict) and c.get('type') == 'text']
+                    _n_img = sum(1 for c in _content if isinstance(c, dict) and c.get('type') == 'image')
+                    _text = ' '.join(_texts)
+                    _img_note = f" [+{_n_img} img]" if _n_img else ""
+                else:
+                    _text = str(_content)
+                    _img_note = ""
+                print(f"!!!! [diag]   [{_role}]{_img_note}: {_text[:600]}")
+            print(f"!!!! [diag] === END GROUP {_di} ===")
+
         samples_list = []
         # groupsize = args.micro_rollout_batch_size
         device = 'cpu'
