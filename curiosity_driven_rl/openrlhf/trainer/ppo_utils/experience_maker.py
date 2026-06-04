@@ -1184,7 +1184,10 @@ def crop_image_normalized(image, bbox_2d,  padding=0.1):
 
 do_controlled_rectify = True
 def execute_tool(images, rawimages, args, toolname, function=None):
-    tgt = args['target_image']
+    try:
+        tgt = int(float(str(args['target_image'])))
+    except (ValueError, TypeError):
+        raise AssertionError(f"Execution Error: `target_image` must be an integer, got {args['target_image']!r}.")
     index = tgt - 1
     if index >= len(images):
         print('!!!!!!! debug')
