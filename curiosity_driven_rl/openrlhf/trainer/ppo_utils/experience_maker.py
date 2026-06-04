@@ -1183,80 +1183,22 @@ def crop_image_normalized(image, bbox_2d,  padding=0.1):
     return cropped_img 
 
 do_controlled_rectify = True
-def execute_tool(images, rawimages, args, toolname, is_video, function=None):
-    if toolname=='select_frames':
-        assert is_video, "Execution Error: You attempted to `select_frames` from **image** not **video**. You should use `crop_image_normalized` instead for inspecting **image**."
-        tgt = args['target_frames']
-        if len(tgt)>8:
-            assert False, f"Execution Error: You have selected {len(tgt)} frames in total. Think again which frames you need to check in details (no more than 8 frames)"
-            message = f"You have selected {len(tgt)} frames in total. Think again which frames you need to check in details (no more than 8 frames)"
-            # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-            ##### controlled modification
-            if do_controlled_rectify and np.random.uniform()<0.75:
-                if np.random.uniform()<0.25:
-                    tgt = tgt[:len(tgt)//2]
-                elif np.random.uniform()<0.25/0.75:
-                    tgt = tgt[-len(tgt)//2:]
-                elif np.random.uniform()<0.25/0.5:
-                    tgt = tgt[::2]
-                else:
-                    tgt = np.random.choice(tgt, size=len(tgt)//2, replace=False)
-                    tgt = sorted(tgt)
-                selected_frames = function(images[0], tgt)
-                message = tgt
-            else: 
-                selected_frames = []
-            # selected_frames = function(images[0], [x-1 for x in tgt][::2]) # video is always in the first item
-        elif max(tgt)>len(images[0]):
-            message = f"Execution Error: There are {len(images[0])} frames numbered in range [1,{len(images[0])}]. Your selection `target_frames={tgt}` is out of range."
-            assert False, message
-            # message = f"There are {len(images[0])} frames numbered in range [1,{len(images[0])}]. Your selection is out of range."
-            # selected_frames = []
-        else:
-            message = ""
-            candidates = images[0]
-            if not isinstance(candidates, list):
-                candidates = [candidates]
-            selected_frames = function(candidates, [x-1 for x in tgt]) # video is always in the first item
-        return selected_frames, message
+def execute_tool(images, rawimages, args, toolname, function=None):
+    tgt = args['target_image']
+    index = tgt - 1
+    if index >= len(images):
+        print('!!!!!!! debug')
+        print(f"{toolname}, target_image={tgt}, images={images}")
+    assert index < len(images), f"Execution Error: Incorrect `target_image` argument in `crop_image_normalized` operation. You can only pick an image within [1,{len(images)}]"
+    if index < len(rawimages):
+        image_to_crop = rawimages[index]
     else:
-        tgt = args['target_image']
-        if is_video: # we allow zoom in directly on a video
-            if len(images)==1: # there is only 
-                # we default the candidate images into video frames 
-                video_frames = images[0]
-                index = tgt - 1 
-                if index>=len(video_frames):
-                    print('!!!!!!! debug')
-                    print(f"{toolname}, target_image={tgt}, video_frames={video_frames}")
-                assert index<len(video_frames), f"Execution Error: Incorrect `target_image` argument in `crop_image_normalized` operation. You can only pick an image **from** the video within [1,{len(video_frames)}], but the current argument `target_image={tgt}`."
-                image_to_crop = video_frames[index]
-            else: # there are zoomed images after the video; images = [[video], img, img, img]
-                cand_images = images #[1:]
-                index = tgt -1
-                assert index>=1, f"Execution Error: Incorrect `target_image` argument in `crop_image_normalized` operation. You can only pick an image within range [2,{len(images)}], but the current argument `target_image={tgt}`."
-                # if index>=len(cand_images):
-                #     print('!!!!!!! debug')
-                #     print(f"{toolname}, target_image={tgt}, candimage={cand_images}")
-                # assert index<len(cand_images), f"Execution Error: Incorrect `target_image` argument in `zoom_in` operation. You can only pick an image **after** the video within [1,{len(cand_images)}], but the current argument `target_image={tgt}`."
-                image_to_crop = cand_images[index]
-        else:
-            index =  tgt-1 
-            if index>=len(images):
-                print('!!!!!!! debug')
-                print(f"{toolname}, target_image={tgt}, images={images}")
-            assert index<len(images), f"Execution Error: Incorrect `target_image` argument in `crop_image_normalized` operation. You can only pick an image within [1,{len(images)}]"
-            
-            if index<len(rawimages):
-                tmp = rawimages[index]
-            else:
-                tmp = images[index]
-            image_to_crop = tmp
-        if toolname == 'reencode':
-            return image_to_crop  # identity; conditioner applies post-processing in experience_maker
-        if function is None: function = crop_image_normalized
-        cropped_image = function(image_to_crop, args['bbox_2d'])
-    return cropped_image
+        image_to_crop = images[index]
+    if toolname == 'reencode':
+        return image_to_crop  # identity; conditioner applies post-processing in experience_maker
+    if function is None:
+        function = crop_image_normalized
+    return function(image_to_crop, args['bbox_2d'])
 
 
 def get_required_messages(messages):
@@ -1466,7 +1408,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         # self.tools = [CropImageNormalized().function]
         ####### new version
         from openrlhf.trainer.ppo_utils.reencode_patch import ReEncode, ReasoningConditioner
-        self.operations = dict(crop_image_normalized=CropImageNormalized(), select_frames=SelectFrames(), reencode=ReEncode())
+        self.operations = dict(crop_image_normalized=CropImageNormalized(), reencode=ReEncode())
         notool = getattr(self.strategy.args, "system_prompt", "none")=="notool"
 
         conditioner_enabled = getattr(self.strategy.args, "use_conditioner", False)
@@ -1538,7 +1480,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         else:
             self.conditioner = ReasoningConditioner() if not notool else None
 
-        self.tools = [] if notool else [self.operations[k].function for k in ['crop_image_normalized', 'select_frames', 'reencode']]
+        self.tools = [] if notool else [self.operations[k].function for k in ['crop_image_normalized', 'reencode']]
         print(f"!!!! [check] prompt notool={notool}")
         self.prompt_maker = NousFnCallPrompt()
 
@@ -2388,87 +2330,60 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                                     if isinstance(item, dict) and item.get('type') == 'text':
                                         reasoning_so_far += item['text'] + "\n"
 
-                    raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, is_video=video_flag, function=self.operations[tool_name].call)
-                    if tool_name=='select_frames':
-
-                        selected_frames, info = raw_result
-                        if not isinstance(info, str): # info is the replacement
-                            # assert "" in msg_this[-1]['content'][0]['text']
-                            oldtext = msg_this[-1]['content'][0]['text']
-                            newtext = oldtext.replace(str([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]), str(info))
-                            msg_this[-1]['content'][0]['text'] = newtext
-
-                        if is_eval:
-                            added = selected_frames
-                        else:
-                            added = [resize_cropped(ff, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else select_maxsize)*28*28) for ff in selected_frames]
-
-                        if len(selected_frames)==0:
-                            msg_this.append(
-                                dict(role='user', content=[
-                                    dict(type='text', text=f"\n{info}"),
-                                ] )
-                            )
-                        else:
-                            msg_this.append(
-                            dict(role='user', content=[
-                                dict(type='text', text="\nHere are the selected frames (Frame Size: {}x{}, Numbered {} to {}):".format(added[0].size[0], added[0].size[1], len(imagelist), len(selected_frames)+len(imagelist)-1)),
-                            ] + [dict(type='image', image=targetpath) for _ in range(len(selected_frames))])
-                            )
-
-                    else:
-                        mtoken = maxtokens[out_idx]
-                        proc_img = resize_cropped(raw_result, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
-                        print(f"[PathB] tool={tool_name} conditioner_is_live={conditioner_is_live}")
-                        if conditioner_is_live and reasoning_so_far is not None:
-                            proc_img = self.conditioner.process(proc_img, focus_hint="", reasoning_history=reasoning_so_far)
-                            # Path B: store raw (pre-conditioning) inputs so training_step_actor
-                            # can recompute conditioned_vit with gradients (no FeatureDecoder).
-                            # Overwrites on multiple reencodes — keeps last one per uuid.
-                            try:
-                                if not hasattr(self, '_reenc_store'):
-                                    self._reenc_store = {}
-                                # Skip if no reasoning context yet — empty sequence
-                                # would cause TransformerEncoder to crash.
-                                if not reasoning_so_far or not reasoning_so_far.strip():
-                                    print(f"[PathB] skipping store for uuid={uuid}: empty reasoning_so_far")
+                    if tool_name not in self.operations:
+                        raise AssertionError(f"Execution Error: Unknown tool `{tool_name}`. Available tools: {list(self.operations.keys())}.")
+                    raw_result = execute_tool(imagelist, rawimagelist, tool_args, tool_name, function=self.operations[tool_name].call)
+                    mtoken = maxtokens[out_idx]
+                    proc_img = resize_cropped(raw_result, min_pixels=(256 if is_eval else 4)*28*28, max_pixels=(5120 if is_eval else zoom_maxsize)*28*28)
+                    print(f"[PathB] tool={tool_name} conditioner_is_live={conditioner_is_live}")
+                    if conditioner_is_live and reasoning_so_far is not None:
+                        proc_img = self.conditioner.process(proc_img, focus_hint="", reasoning_history=reasoning_so_far)
+                        # Path B: store raw (pre-conditioning) inputs so training_step_actor
+                        # can recompute conditioned_vit with gradients (no FeatureDecoder).
+                        # Overwrites on multiple reencodes — keeps last one per uuid.
+                        try:
+                            if not hasattr(self, '_reenc_store'):
+                                self._reenc_store = {}
+                            # Skip if no reasoning context yet — empty sequence
+                            # would cause TransformerEncoder to crash.
+                            if not reasoning_so_far or not reasoning_so_far.strip():
+                                print(f"[PathB] skipping store for uuid={uuid}: empty reasoning_so_far")
+                            else:
+                                _raw_pv, _raw_thw = self.conditioner._preprocess_image(raw_result)
+                                _raw_tok = self.conditioner.tokenizer(
+                                    reasoning_so_far,
+                                    return_tensors="pt",
+                                    max_length=2048,
+                                    truncation=True,
+                                    padding=True,
+                                )
+                                _tok_len = _raw_tok['input_ids'].shape[-1]
+                                if _tok_len == 0:
+                                    print(f"[PathB] skipping store for uuid={uuid}: tokenizer returned empty ids")
                                 else:
-                                    _raw_pv, _raw_thw = self.conditioner._preprocess_image(raw_result)
-                                    _raw_tok = self.conditioner.tokenizer(
-                                        reasoning_so_far,
-                                        return_tensors="pt",
-                                        max_length=2048,
-                                        truncation=True,
-                                        padding=True,
+                                    # image_idx = position this image will occupy in all_images[uuid]
+                                    # (recorded before the append that happens below)
+                                    self._reenc_store[uuid] = dict(
+                                        pixel_values=_raw_pv.cpu(),
+                                        grid_thw=_raw_thw.cpu(),
+                                        reasoning_ids=_raw_tok['input_ids'].cpu(),
+                                        reasoning_mask=_raw_tok['attention_mask'].cpu(),
+                                        image_idx=len(all_images[uuid]),  # 0-based index after append
                                     )
-                                    _tok_len = _raw_tok['input_ids'].shape[-1]
-                                    if _tok_len == 0:
-                                        print(f"[PathB] skipping store for uuid={uuid}: tokenizer returned empty ids")
-                                    else:
-                                        # image_idx = position this image will occupy in all_images[uuid]
-                                        # (recorded before the append that happens at line ~2428)
-                                        self._reenc_store[uuid] = dict(
-                                            pixel_values=_raw_pv.cpu(),
-                                            grid_thw=_raw_thw.cpu(),
-                                            reasoning_ids=_raw_tok['input_ids'].cpu(),
-                                            reasoning_mask=_raw_tok['attention_mask'].cpu(),
-                                            image_idx=len(all_images[uuid]),  # 0-based index after append
-                                        )
-                                        print(f"[PathB] stored reenc data for uuid={uuid}, patches={_raw_pv.shape[0]}, tok_len={_tok_len}, image_idx={len(all_images[uuid])}")
-                            except Exception as _e:
-                                print(f"[PathB] store failed: {_e}")
-                        if do_dump:
-                            proc_img.save(targetpath)
-                            print('dumped', targetpath)
-                        
-                        added = [proc_img]
-                        msg_this.append(
-                            dict(role='user', content=[
-                                dict(type='text', text="\nHere is the cropped image (Image Size: {}x{}):".format(proc_img.size[0], proc_img.size[1])),
-                                dict(type='image', image=targetpath)
-                            ])
-                        )
-                    
+                                    print(f"[PathB] stored reenc data for uuid={uuid}, patches={_raw_pv.shape[0]}, tok_len={_tok_len}, image_idx={len(all_images[uuid])}")
+                        except Exception as _e:
+                            print(f"[PathB] store failed: {_e}")
+                    if do_dump:
+                        proc_img.save(targetpath)
+                        print('dumped', targetpath)
+                    added = [proc_img]
+                    msg_this.append(
+                        dict(role='user', content=[
+                            dict(type='text', text="\nHere is the cropped image (Image Size: {}x{}):".format(proc_img.size[0], proc_img.size[1])),
+                            dict(type='image', image=targetpath)
+                        ])
+                    )
+
                 except Exception as e:
                     print('!!!!!!! warning')
                     print(e)
