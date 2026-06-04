@@ -146,10 +146,13 @@ class ZeroInitAdapterLayer(nn.Module):
         # This is the key LLaMA-Adapter design choice.
         # We do NOT concatenate with original K/V and do joint softmax.
         # Independent softmax ensures at gate=0, original attention is untouched.
-        attn_weights = torch.matmul(Q, adapter_K.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        #
+        # Compute in fp32: bf16 attention weights overflow when adapter_K values
+        # are large, producing all-inf weights whose softmax gives NaN.
+        attn_weights = torch.matmul(Q.float(), adapter_K.float().transpose(-2, -1)) / (self.head_dim ** 0.5)
         # attn_weights: (1, n_heads, N, K_adapt)
 
-        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = F.softmax(attn_weights, dim=-1).to(Q.dtype)
 
         # Weighted sum of adapter values
         adapter_output = torch.matmul(attn_weights, adapter_V)
@@ -162,7 +165,10 @@ class ZeroInitAdapterLayer(nn.Module):
         # ── ZERO GATING ──
         # original_block_output is already the full block output (self-attn + MLP).
         # We add the gated adapter contribution as a residual.
-        return original_block_output + torch.tanh(self.gate) * adapter_output
+        # nan_to_num: IEEE 754 gives 0 * NaN = NaN, so if adapter_output is NaN
+        # (e.g., all-masked reasoning → NaN encoder output), gate=0 would still
+        # poison the block output. nan_to_num makes gate=0 a true no-op.
+        return original_block_output + torch.tanh(self.gate) * adapter_output.nan_to_num(0.0)
 
 
 # =============================================================================
@@ -254,6 +260,15 @@ class ReasoningEncoder(nn.Module):
         x = self.token_embedding(input_ids) + self.pos_embedding(positions)
 
         src_key_padding_mask = ~attention_mask.bool()
+
+        # Guard: all tokens masked → TransformerEncoder softmax(-inf,...) = NaN.
+        # Return zero adapter prompts so gate=0 leaves the ViT output unchanged.
+        if src_key_padding_mask.all():
+            dtype = self.token_embedding.weight.dtype
+            K = self.compress_queries.shape[1]
+            return torch.zeros(B, K, self.output_proj.out_features,
+                               device=input_ids.device, dtype=dtype)
+
         x = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
         # x: (1, S, d_model)
 
