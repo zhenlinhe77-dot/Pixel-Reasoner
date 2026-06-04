@@ -110,16 +110,18 @@ Zoom in on the image based on the bounding box coordinates.
         else:
             normalized_bbox_2d = (float(bbox_2d[0])/img_x-padding[0], float(bbox_2d[1])/img_y-padding[1], float(bbox_2d[2])/img_x+padding[0], float(bbox_2d[3])/img_y+padding[1])
         normalized_x1, normalized_y1, normalized_x2, normalized_y2 = normalized_bbox_2d
+        # Fix swapped coordinates (model sometimes outputs x1>x2 or y1>y2)
+        normalized_x1, normalized_x2 = min(normalized_x1, normalized_x2), max(normalized_x1, normalized_x2)
+        normalized_y1, normalized_y2 = min(normalized_y1, normalized_y2), max(normalized_y1, normalized_y2)
         normalized_x1 =min(max(0, normalized_x1), 1)
         normalized_y1 =min(max(0, normalized_y1), 1)
         normalized_x2 =min(max(0, normalized_x2), 1)
         normalized_y2 =min(max(0, normalized_y2), 1)
         cropped_img = image.crop((int(normalized_x1*img_x), int(normalized_y1*img_y), int(normalized_x2*img_x), int(normalized_y2*img_y)))
         w, h = cropped_img.size
-        assert w > 28 and h > 28, f"Cropped image is too small: {w}x{h}"
+        assert w > 28 and h > 28, f"Execution Error: Cropped image is too small ({w}x{h}px). Your bounding box [x1={bbox_2d[0]}, y1={bbox_2d[1]}, x2={bbox_2d[2]}, y2={bbox_2d[3]}] is too narrow or too short. Ensure x1 < x2 and y1 < y2 and the region spans at least ~5%% of the image in each dimension."
 
-
-        return cropped_img  
+        return cropped_img
 
 @register_tool("crop_image_normalized")
 class CropImageNormalized(BaseTool):
@@ -157,17 +159,18 @@ Zoom in on the image based on the bounding box coordinates. It is useful when th
         else:
             normalized_bbox_2d = (float(bbox_2d[0])/img_x-padding, float(bbox_2d[1])/img_y-padding, float(bbox_2d[2])/img_x+padding, float(bbox_2d[3])/img_y+padding)
         normalized_x1, normalized_y1, normalized_x2, normalized_y2 = normalized_bbox_2d
+        # Fix swapped coordinates (model sometimes outputs x1>x2 or y1>y2)
+        normalized_x1, normalized_x2 = min(normalized_x1, normalized_x2), max(normalized_x1, normalized_x2)
+        normalized_y1, normalized_y2 = min(normalized_y1, normalized_y2), max(normalized_y1, normalized_y2)
         normalized_x1 =min(max(0, normalized_x1), 1)
         normalized_y1 =min(max(0, normalized_y1), 1)
         normalized_x2 =min(max(0, normalized_x2), 1)
         normalized_y2 =min(max(0, normalized_y2), 1)
         cropped_img = image.crop((normalized_x1*img_x, normalized_y1*img_y, normalized_x2*img_x, normalized_y2*img_y))
         w, h = cropped_img.size
-        assert w > 28 and h > 28, f"Cropped image is too small: {w}x{h}"
+        assert w > 28 and h > 28, f"Execution Error: Cropped image is too small ({w}x{h}px). Your bounding box [x1={bbox_2d[0]}, y1={bbox_2d[1]}, x2={bbox_2d[2]}, y2={bbox_2d[3]}] is too narrow or too short. Ensure x1 < x2 and y1 < y2 and the region spans at least ~5%% of the image in each dimension."
 
-
-
-        return cropped_img 
+        return cropped_img
     
 
 def extract_qwen_query_and_response(input_text):
@@ -1167,13 +1170,16 @@ def crop_image_normalized(image, bbox_2d,  padding=0.1):
     else:
         normalized_bbox_2d = (float(bbox_2d[0])/img_x-padding, float(bbox_2d[1])/img_y-padding, float(bbox_2d[2])/img_x+padding, float(bbox_2d[3])/img_y+padding)
     normalized_x1, normalized_y1, normalized_x2, normalized_y2 = normalized_bbox_2d
+    # Fix swapped coordinates (model sometimes outputs x1>x2 or y1>y2)
+    normalized_x1, normalized_x2 = min(normalized_x1, normalized_x2), max(normalized_x1, normalized_x2)
+    normalized_y1, normalized_y2 = min(normalized_y1, normalized_y2), max(normalized_y1, normalized_y2)
     normalized_x1 =min(max(0, normalized_x1), 1)
     normalized_y1 =min(max(0, normalized_y1), 1)
     normalized_x2 =min(max(0, normalized_x2), 1)
     normalized_y2 =min(max(0, normalized_y2), 1)
     cropped_img = image.crop((normalized_x1*img_x, normalized_y1*img_y, normalized_x2*img_x, normalized_y2*img_y))
     w, h = cropped_img.size
-    assert w > 28 and h > 28, f"Cropped image is too small: {w}x{h}"
+    assert w > 28 and h > 28, f"Execution Error: Cropped image is too small ({w}x{h}px). Your bounding box [x1={bbox_2d[0]}, y1={bbox_2d[1]}, x2={bbox_2d[2]}, y2={bbox_2d[3]}] is too narrow or too short. Ensure x1 < x2 and y1 < y2 and the region spans at least ~5%% of the image in each dimension."
     return cropped_img 
 
 do_controlled_rectify = True
