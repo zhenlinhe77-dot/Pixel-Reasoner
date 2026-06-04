@@ -587,7 +587,17 @@ class NaiveExperienceMaker(ABC):
         elif args.advantage_estimator in ["group", "group_sft"]: # this operates in batch level
             rewards = torch.cat(tmp) 
             rewards = rewards.reshape(-1, nsample) # .to(device="cuda")  # (bsz,nsample) into groups
-            raw_r = rewards.detach().numpy() # bsz,nsamples 
+            raw_r = rewards.detach().numpy() # bsz,nsamples
+
+            # Diagnose adv=0: print per-group rewards so we can see if groups
+            # are all-same (too easy/hard) or have variance (temperature working).
+            zero_var_groups = (raw_r.std(-1) == 0).sum()
+            print(f"!!!! [group_diag] {zero_var_groups}/{len(raw_r)} groups have zero reward variance (adv will be 0)")
+            for gi in range(min(4, len(raw_r))):
+                exp0 = experiences[gi * nsample]
+                q = (exp0.questions[0] if exp0.questions else "?")[:120].replace("\n", " ")
+                print(f"!!!! [group_diag] group {gi}  rewards={np.round(raw_r[gi],3).tolist()}  q='{q}'")
+
             mean_acc = np.tile(raw_r.mean(-1, keepdims=True), (1,nsample))
             solve_all = mean_acc>0.95
             solve_none = mean_acc<0.05
