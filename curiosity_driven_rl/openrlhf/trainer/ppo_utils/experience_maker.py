@@ -598,7 +598,7 @@ class NaiveExperienceMaker(ABC):
             print(f"!!!! [group_diag] {zero_var_groups}/{len(raw_r)} groups have zero reward variance (adv will be 0)")
             for gi in range(min(4, len(raw_r))):
                 exp0 = experiences[gi * nsample]
-                q = (exp0.questions[0] if exp0.questions else "?")[:120].replace("\n", " ")
+                q = str((exp0.info.get('qids') or ['?'])[0])[:120]
                 print(f"!!!! [group_diag] group {gi}  rewards={np.round(raw_r[gi],3).tolist()}  q='{q}'")
 
             mean_acc = np.tile(raw_r.mean(-1, keepdims=True), (1,nsample))
