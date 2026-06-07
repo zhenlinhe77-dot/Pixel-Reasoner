@@ -497,7 +497,12 @@ class ConditionedViT(nn.Module):
         print(f"[ConditionedViT] Encoder params:    {encoder_params:>12,}")
 
         for name, layer in self.adapter_layers.items():
-            print(f"[ConditionedViT] Block {name:>2s} gate: {torch.tanh(layer.gate).item():.6f}")
+            gate_tanh = torch.tanh(layer.gate)
+            if gate_tanh.numel() == 1:
+                print(f"[ConditionedViT] Block {name:>2s} gate: {gate_tanh.item():.6f}")
+            else:
+                vals = ", ".join(f"{v:.4f}" for v in gate_tanh.tolist())
+                print(f"[ConditionedViT] Block {name:>2s} gate (per-head): [{vals}]")
 
 
 # =============================================================================
