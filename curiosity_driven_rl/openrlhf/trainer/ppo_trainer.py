@@ -772,6 +772,10 @@ class PPOTrainer(ABC):
                         print(f"[PathB-train] {_time.strftime('%H:%M:%S')} rank={_rank} calling encode_for_llm patches={_n_patches} seq={_seq_len}")
                         _cf = _conditioner.encode_for_llm(_pv, _thw, _rid, _rmk)
                         print(f"[PathB-train] {_time.strftime('%H:%M:%S')} rank={_rank} encode_for_llm ok cf.shape={_cf.shape} cf.requires_grad={_cf.requires_grad}")
+                        if _cf.isnan().any():
+                            print(f"[PathB-train] WARNING: cf contains NaN ({_cf.isnan().sum().item()} values), skipping PathB for this sample")
+                            _cf = None
+                            _pe = 0
                     except torch.cuda.OutOfMemoryError:
                         print(f"[PathB-train] OOM in encode_for_llm ({_n_patches} patches), skipping")
                         torch.cuda.empty_cache()
@@ -866,11 +870,11 @@ class PPOTrainer(ABC):
         skip = False 
         if sft_only: loss = aux_loss
         else: 
-            advlist = [x[-1].item() for x in experience.advantages]
-            nonzero = np.mean([x!=0 for x in advlist])
-            print(f'!!!! [training] adv nonzero ratio', nonzero, 'kl penalty ratio', kl_penalty_coef)
+            advlist = [x.abs().max().item() for x in experience.advantages]
+            nonzero = np.mean([x != 0 for x in advlist])
+            print(f'!!!! [training] sample_nonzero_adv', nonzero, 'kl penalty ratio', kl_penalty_coef)
             loss = actor_loss + aux_loss * self.args.aux_loss_coef + kl_penalty_coef*actor_loss_dict.get("kl_penalty",0.0) + self.args.entropy_loss_coef * entropy_loss
-            print('!!!! [training] iter', self.iter, f'actorloss={actor_loss.item()}, sftloss={aux_loss if isinstance(aux_loss,float) else aux_loss.item()}, final={loss.item()}, reward={experience.info["reward"]}, adv={advlist}, waits={experience.info["round1_nwait"]}, val={experience.validity}')
+            print('!!!! [training] iter', self.iter, f'actorloss={actor_loss.item()}, sftloss={aux_loss if isinstance(aux_loss,float) else aux_loss.item()}, final={loss.item()}, reward={experience.info["reward"]}, max_adv={advlist}, waits={experience.info["round1_nwait"]}, val={experience.validity}')
             
         if not skip:
             self.strategy.backward(loss, self.actor, self.actor_optim)
@@ -912,7 +916,7 @@ class PPOTrainer(ABC):
             status = {"effective_loss": loss.item(),"actor_lr": self.actor_scheduler.get_last_lr()[0],}
         else:
             status = {"policy_loss": actor_loss.item(), "actor_lr": self.actor_scheduler.get_last_lr()[0], "validity":",".join([str(round(x.max().item(),1)) for x in validity]),
-                  "adv_nonzero": nonzero, "effective_loss": loss.item()}
+                  "sample_nonzero_adv": nonzero, "effective_loss": loss.item()}
     
         status.update(actor_loss_dict)
         if ptx_loss is not None:
