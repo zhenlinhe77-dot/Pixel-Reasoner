@@ -86,10 +86,12 @@ class ZeroInitAdapterLayer(nn.Module):
         # Output projection for the adapter attention
         self.adapter_out_proj = nn.Linear(d_visual, d_visual, bias=False)
 
-        # ── ZERO-INIT GATE ──
-        # Scalar initialized to 0. Controls adapter contribution.
-        # At t=0: tanh(0)=0 → adapter does nothing → frozen ViT behavior
-        self.gate = nn.Parameter(torch.zeros(1))
+        # ── GATE ──
+        # Scalar initialized to 0.1: tanh(0.1)≈0.10 → ~10% adapter contribution
+        # at init.  Small enough not to disrupt the pretrained ViT; large enough
+        # that adapter_out_proj and the reasoning encoder receive non-zero
+        # gradients from step 1 (gate=0 killed their gradients via chain rule).
+        self.gate = nn.Parameter(torch.full((1,), 0.1))
 
         # Layer norm for the adapter input (stabilizes training)
         self.adapter_norm = nn.LayerNorm(d_visual)
@@ -99,7 +101,7 @@ class ZeroInitAdapterLayer(nn.Module):
     def _init_weights(self):
         nn.init.xavier_uniform_(self.adapter_k_proj.weight, gain=0.01)
         nn.init.xavier_uniform_(self.adapter_v_proj.weight, gain=0.01)
-        nn.init.zeros_(self.adapter_out_proj.weight)
+        nn.init.xavier_uniform_(self.adapter_out_proj.weight, gain=0.01)
 
     def forward(
         self,
