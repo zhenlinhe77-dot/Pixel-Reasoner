@@ -61,7 +61,7 @@ class ZeroInitAdapterLayer(nn.Module):
     1. Takes reasoning features as adapter prompts
     2. Projects them into K/V space matching the ViT's attention
     3. Computes attention from visual Q to adapter K/V (independent softmax)
-    4. Gates the output with a zero-initialized scalar
+    4. Gates each attention head independently with a learned (n_heads,) vector
     5. Adds to the original attention output as a residual
 
     This is applied as a WRAPPER around the existing ViT block —
@@ -86,12 +86,14 @@ class ZeroInitAdapterLayer(nn.Module):
         # Output projection for the adapter attention
         self.adapter_out_proj = nn.Linear(d_visual, d_visual, bias=False)
 
-        # ── GATE ──
-        # Scalar initialized to 0.1: tanh(0.1)≈0.10 → ~10% adapter contribution
-        # at init.  Small enough not to disrupt the pretrained ViT; large enough
-        # that adapter_out_proj and the reasoning encoder receive non-zero
-        # gradients from step 1 (gate=0 killed their gradients via chain rule).
-        self.gate = nn.Parameter(torch.full((1,), 0.1))
+        # ── PER-HEAD GATE ──
+        # Shape (n_heads,): one scalar per attention head, init 0.1.
+        # Applied before adapter_out_proj on the (1, n_heads, N, head_dim) tensor.
+        # Per-head gating lets the model learn that some heads carry spatial
+        # signal and others semantic signal, weighting them independently.
+        # tanh(0.1)≈0.10 → ~10% contribution at init; large enough that
+        # adapter_out_proj and reasoning encoder receive real gradients from step 1.
+        self.gate = nn.Parameter(torch.full((n_heads,), 0.1))
 
         # Layer norm for the adapter input (stabilizes training)
         self.adapter_norm = nn.LayerNorm(d_visual)
@@ -160,17 +162,20 @@ class ZeroInitAdapterLayer(nn.Module):
         adapter_output = torch.matmul(attn_weights, adapter_V)
         # adapter_output: (1, n_heads, N, head_dim)
 
+        # ── PER-HEAD GATING ���─
+        # gate: (n_heads,) → (1, n_heads, 1, 1) to broadcast over (1, n_heads, N, head_dim).
+        # Applied before out_proj so the projection mixes already-gated head outputs.
+        # nan_to_num on adapter_output first: if any head produced NaN (e.g. from
+        # all-masked reasoning), replace with 0 before multiplying to avoid
+        # propagating NaN through the gate and into original_block_output.
+        gate = torch.tanh(self.gate).view(1, self.n_heads, 1, 1)
+        adapter_output = adapter_output.nan_to_num(0.0) * gate
+
         adapter_output = adapter_output.transpose(1, 2).contiguous().view(1, N, D)
         adapter_output = self.adapter_out_proj(adapter_output)
         adapter_output = adapter_output.squeeze(0)  # (N, D)
 
-        # ── ZERO GATING ──
-        # original_block_output is already the full block output (self-attn + MLP).
-        # We add the gated adapter contribution as a residual.
-        # nan_to_num: IEEE 754 gives 0 * NaN = NaN, so if adapter_output is NaN
-        # (e.g., all-masked reasoning → NaN encoder output), gate=0 would still
-        # poison the block output. nan_to_num makes gate=0 a true no-op.
-        return original_block_output + torch.tanh(self.gate) * adapter_output.nan_to_num(0.0)
+        return original_block_output + adapter_output
 
 
 # =============================================================================

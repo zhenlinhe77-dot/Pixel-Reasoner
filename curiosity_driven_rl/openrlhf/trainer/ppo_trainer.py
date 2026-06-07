@@ -629,9 +629,13 @@ class PPOTrainer(ABC):
             if _cond is not None and hasattr(_cond, 'conditioned_vit') and global_steps % 5 == 0:
                 for _bn, _layer in _cond.conditioned_vit.adapter_layers.items():
                     _g = _layer.gate.grad
-                    _g_str = f"{_g.item():.4e}" if _g is not None else "None"
+                    if _g is not None:
+                        _g_str = "[" + ", ".join(f"{v:.3e}" for v in _g.tolist()) + "]"
+                    else:
+                        _g_str = "None"
+                    _raw = "[" + ", ".join(f"{v:.3e}" for v in _layer.gate.tolist()) + "]"
                     print(f"[gate grad] step={global_steps} block={_bn}: "
-                          f"gate_raw={_layer.gate.item():.4e}  grad={_g_str}")
+                          f"gate_raw={_raw}  grad={_g_str}")
             self.conditioner_optim.step()
             self.conditioner_optim.zero_grad()
         return status
@@ -883,7 +887,10 @@ class PPOTrainer(ABC):
                 _gate_grads = {}
                 for _bn, _layer in _conditioner.conditioned_vit.adapter_layers.items():
                     _g = _layer.gate.grad
-                    _gate_grads[_bn] = f"{_g.item():.4e}" if _g is not None else "None"
+                    if _g is not None:
+                        _gate_grads[_bn] = "[" + ", ".join(f"{v:.3e}" for v in _g.tolist()) + "]"
+                    else:
+                        _gate_grads[_bn] = "None"
                 print(f"[PathB-train] post-bwd gate grads: {_gate_grads}")
         del action_entropy
         # ptx loss
@@ -1034,8 +1041,10 @@ class PPOTrainer(ABC):
                     self.experience_maker.conditioner is not None and
                     hasattr(self.experience_maker.conditioner, 'conditioned_vit')):
                 for name, layer in self.experience_maker.conditioner.conditioned_vit.adapter_layers.items():
-                    gate_val = torch.tanh(layer.gate).item()
-                    logs_dict[f"conditioner/gate_block_{name}"] = gate_val
+                    gate_tanh = torch.tanh(layer.gate)
+                    logs_dict[f"conditioner/gate_mean_block_{name}"] = gate_tanh.mean().item()
+                    for hi, gv in enumerate(gate_tanh.tolist()):
+                        logs_dict[f"conditioner/gate_h{hi:02d}_block_{name}"] = gv
             # wandb
             tagname = 'eval' if is_eval else 'train'
             if self._wandb is not None and self.strategy.is_rank_0():
