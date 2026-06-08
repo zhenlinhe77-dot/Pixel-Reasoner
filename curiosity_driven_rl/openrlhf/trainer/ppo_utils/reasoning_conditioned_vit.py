@@ -751,7 +751,9 @@ if __name__ == "__main__":
     print(f"  Adapter:      {reasoning.shape}")
     print(f"  Block output: {block_output.shape}")
     print(f"  Output:       {out.shape}")
-    print(f"  Gate:         {torch.tanh(adapter.gate).item():.6f}")
+    _gate_t = torch.tanh(adapter.gate)
+    _gate_str = f"{_gate_t.item():.6f}" if _gate_t.numel() == 1 else "[" + ", ".join(f"{v:.4f}" for v in _gate_t.tolist()) + "]"
+    print(f"  Gate:         {_gate_str}")
 
     # Verify zero-init: output should equal block_output at init
     diff = (out - block_output).abs().max().item()
