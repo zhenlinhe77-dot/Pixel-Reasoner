@@ -221,6 +221,12 @@ class ActorPPOTrainer(PPOTrainer):
                     print(f"[gate] step={global_steps} block={_bn}: raw={_raw}  grad={_g_str}")
             self.conditioner_optim.step()
             self.conditioner_optim.zero_grad()
+            # Broadcast updated conditioner weights from rank-0 to all other ranks
+            # so every rank's rollout conditioner stays in sync.
+            if (torch.distributed.is_available() and torch.distributed.is_initialized()
+                    and _cond is not None and hasattr(_cond, 'get_trainable_parameters')):
+                for _p in _cond.get_trainable_parameters():
+                    torch.distributed.broadcast(_p.data, src=0)
         return status
 
     def _broadcast_to_vllm(self):
