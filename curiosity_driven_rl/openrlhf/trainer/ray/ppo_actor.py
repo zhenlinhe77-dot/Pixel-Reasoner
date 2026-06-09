@@ -219,7 +219,12 @@ class ActorPPOTrainer(PPOTrainer):
                         _g_str = "None"
                     _raw = "[" + ", ".join(f"{v:.3e}" for v in _layer.gate.tolist()) + "]"
                     print(f"[gate] step={global_steps} block={_bn}: raw={_raw}  grad={_g_str}")
-            self.conditioner_optim.step()
+            # Only rank-0 steps the optimizer so its AdamW state never gets
+            # corrupted by per-rank gradient variance. Other ranks call zero_grad
+            # only so accumulated gradients don't leak into future PathB samples.
+            _is_rank0 = (not torch.distributed.is_initialized()) or torch.distributed.get_rank() == 0
+            if _is_rank0:
+                self.conditioner_optim.step()
             self.conditioner_optim.zero_grad()
             # Broadcast updated conditioner weights from rank-0 to all other ranks
             # so every rank's rollout conditioner stays in sync.

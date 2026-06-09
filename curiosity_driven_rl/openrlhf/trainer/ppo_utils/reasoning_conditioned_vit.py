@@ -165,11 +165,10 @@ class ZeroInitAdapterLayer(nn.Module):
         # ── PER-HEAD GATING ���─
         # gate: (n_heads,) → (1, n_heads, 1, 1) to broadcast over (1, n_heads, N, head_dim).
         # Applied before out_proj so the projection mixes already-gated head outputs.
-        # nan_to_num on adapter_output first: if any head produced NaN (e.g. from
-        # all-masked reasoning), replace with 0 before multiplying to avoid
-        # propagating NaN through the gate and into original_block_output.
+        # nan_to_num: zero out NaN AND inf (inf survives plain nan_to_num(0.0) and
+        # later causes LayerNorm NaN via inf - mean = NaN).
         gate = torch.tanh(self.gate).view(1, self.n_heads, 1, 1)
-        adapter_output = adapter_output.nan_to_num(0.0) * gate
+        adapter_output = adapter_output.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0) * gate
 
         adapter_output = adapter_output.transpose(1, 2).contiguous().view(1, N, D)
         adapter_output = self.adapter_out_proj(adapter_output)
@@ -293,6 +292,9 @@ class ReasoningEncoder(nn.Module):
         # Project to ViT dimension
         adapter_prompts = self.output_norm(self.output_proj(compressed))
         # adapter_prompts: (1, K_adapt, d_output=1280)
+
+        # Guard: clamp non-finite values so a degraded encoder never corrupts the ViT.
+        adapter_prompts = adapter_prompts.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
 
         return adapter_prompts
 
