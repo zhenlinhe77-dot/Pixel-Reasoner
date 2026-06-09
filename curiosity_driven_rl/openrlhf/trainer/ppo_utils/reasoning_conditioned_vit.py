@@ -679,10 +679,18 @@ class ReasoningConditionerV2(nn.Module):
 
         return result_image
 
-    def _preprocess_image(self, image: Image.Image) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _preprocess_image(
+        self,
+        image: Image.Image,
+        max_pixels: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Preprocess PIL image using the Qwen2.5-VL processor.
         Returns (pixel_values, grid_thw) matching ViT input format.
+
+        Args:
+            max_pixels: if set, cap image resolution so patches <= max_pixels/196.
+                        Pass 1024*14*14=200704 to guarantee at most 1024 patches.
         """
         from qwen_vl_utils import process_vision_info
 
@@ -695,10 +703,14 @@ class ReasoningConditionerV2(nn.Module):
             messages, tokenize=False, add_generation_prompt=False
         )
 
+        processor_kwargs = {"return_tensors": "pt"}
+        if max_pixels is not None:
+            processor_kwargs["max_pixels"] = max_pixels
+
         inputs = self.processor(
             text=[text],
             images=image_inputs,
-            return_tensors="pt",
+            **processor_kwargs,
         )
         pixel_values = inputs['pixel_values'].to(self.device, dtype=torch.bfloat16)
         grid_thw = inputs['image_grid_thw'].to(self.device)

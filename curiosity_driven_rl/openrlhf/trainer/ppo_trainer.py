@@ -766,7 +766,9 @@ class PPOTrainer(ABC):
             if _pe > _ps:
                 _conditioner.conditioned_vit.train()
                 _n_patches = int(_pv.shape[0])
-                _MAX_PATCHES = 1024
+                # Storage now caps at 1024 patches (max_pixels=200704); 1200 guards
+                # against processor rounding edge cases.
+                _MAX_PATCHES = 1200
                 _cf = None
                 if _n_patches > _MAX_PATCHES:
                     print(f"[PathB-train] skipping encode_for_llm: {_n_patches} patches > {_MAX_PATCHES} limit")

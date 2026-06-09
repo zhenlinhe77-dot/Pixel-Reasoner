@@ -2352,7 +2352,11 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
                             if not reasoning_so_far or not reasoning_so_far.strip():
                                 print(f"[PathB] skipping store for uuid={uuid}: empty reasoning_so_far")
                             else:
-                                _raw_pv, _raw_thw = self.conditioner._preprocess_image(raw_result)
+                                # Cap at 1024 patches (200704 px) so PathB training never OOMs.
+                                # 1024 * 14 * 14 = 200704 = Qwen2.5-VL's min_pixels floor.
+                                _raw_pv, _raw_thw = self.conditioner._preprocess_image(
+                                    raw_result, max_pixels=200704
+                                )
                                 _raw_tok = self.conditioner.tokenizer(
                                     reasoning_so_far,
                                     return_tensors="pt",
