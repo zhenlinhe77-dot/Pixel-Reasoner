@@ -696,8 +696,15 @@ class ReasoningConditionerV2(nn.Module):
         """
         from qwen_vl_utils import process_vision_info
 
+        # max_pixels must be set in the content dict — process_vision_info reads it
+        # there to resize the PIL image before the processor sees it.
+        # Passing max_pixels as a processor kwarg is silently ignored.
+        image_content: dict = {"type": "image", "image": image}
+        if max_pixels is not None:
+            image_content["max_pixels"] = max_pixels
+
         messages = [{"role": "user", "content": [
-            {"type": "image", "image": image},
+            image_content,
             {"type": "text", "text": ""},
         ]}]
         image_inputs, _ = process_vision_info(messages)
@@ -705,14 +712,10 @@ class ReasoningConditionerV2(nn.Module):
             messages, tokenize=False, add_generation_prompt=False
         )
 
-        processor_kwargs = {"return_tensors": "pt"}
-        if max_pixels is not None:
-            processor_kwargs["max_pixels"] = max_pixels
-
         inputs = self.processor(
             text=[text],
             images=image_inputs,
-            **processor_kwargs,
+            return_tensors="pt",
         )
         pixel_values = inputs['pixel_values'].to(self.device, dtype=torch.bfloat16)
         grid_thw = inputs['image_grid_thw'].to(self.device)
