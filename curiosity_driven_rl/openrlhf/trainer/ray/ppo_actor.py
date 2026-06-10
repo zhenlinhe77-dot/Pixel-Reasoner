@@ -331,13 +331,13 @@ class ActorPPOTrainer(PPOTrainer):
                 self.processor or self.tokenizer,
                 save_path,
             )
-            if (hasattr(self.experience_maker, 'conditioner') and
-                    self.experience_maker.conditioner is not None and
-                    isinstance(self.experience_maker.conditioner, torch.nn.Module) and
-                    self.strategy.is_rank_0()):
-                conditioner_path = os.path.join(save_path, "conditioner.pt")
-                torch.save(self.experience_maker.conditioner.state_dict(), conditioner_path)
-                print(f"[ConditionedViT] Saved conditioner to {conditioner_path}")
+        if (hasattr(self.experience_maker, 'conditioner') and
+                self.experience_maker.conditioner is not None and
+                isinstance(self.experience_maker.conditioner, torch.nn.Module) and
+                self.strategy.is_rank_0()):
+            conditioner_path = os.path.join(args.ckpt_path, "conditioner.pt")
+            torch.save(self.experience_maker.conditioner.state_dict(), conditioner_path)
+            print(f"[ConditionedViT] Saved conditioner to {conditioner_path}")
             max_num = args.max_ckpt_num
             if self.strategy.is_rank_0():
                 while True:
@@ -644,20 +644,36 @@ class ActorModelRayActor(BasePPORole):
         if (hasattr(trainer.experience_maker, 'conditioner') and
                 trainer.experience_maker.conditioner is not None and
                 hasattr(trainer.experience_maker.conditioner, 'get_trainable_parameters')):
-            # load conditioner.pt from the most recent _hf dir if available
+            # load conditioner.pt: flat path > _hf dirs > pretrain dir
             ckpt_dir = args.ckpt_path
-            if os.path.exists(ckpt_dir):
+            _cond_path = None
+            flat_cond = os.path.join(ckpt_dir, "conditioner.pt")
+            if os.path.exists(flat_cond):
+                _cond_path = flat_cond
+            elif os.path.exists(ckpt_dir):
                 hf_dirs = sorted(
                     [d for d in os.listdir(ckpt_dir) if d.endswith('_hf') and os.path.isdir(os.path.join(ckpt_dir, d))],
                     key=lambda d: os.path.getmtime(os.path.join(ckpt_dir, d))
                 )
                 if hf_dirs:
-                    conditioner_path = os.path.join(ckpt_dir, hf_dirs[-1], "conditioner.pt")
-                    if os.path.exists(conditioner_path):
-                        trainer.experience_maker.conditioner.load_state_dict(
-                            torch.load(conditioner_path, map_location='cuda')
-                        )
-                        print(f"[ConditionedViT] Loaded conditioner from {conditioner_path}")
+                    candidate = os.path.join(ckpt_dir, hf_dirs[-1], "conditioner.pt")
+                    if os.path.exists(candidate):
+                        _cond_path = candidate
+            if _cond_path is None:
+                pretrain_cond = os.path.join(args.pretrain, "conditioner.pt")
+                if os.path.exists(pretrain_cond):
+                    _cond_path = pretrain_cond
+            if _cond_path is not None:
+                _sd = torch.load(_cond_path, map_location='cuda')
+                _model_sd = trainer.experience_maker.conditioner.state_dict()
+                for _k in list(_sd.keys()):
+                    if 'gate' in _k and _k in _model_sd and _sd[_k].shape != _model_sd[_k].shape:
+                        if _sd[_k].numel() == 1 and _model_sd[_k].numel() > 1:
+                            _n = _model_sd[_k].numel()
+                            _sd[_k] = _sd[_k].expand(_n).clone()
+                            print(f"[ConditionedViT] Gate migration {_k}: (1,) -> ({_n},)")
+                trainer.experience_maker.conditioner.load_state_dict(_sd)
+                print(f"[ConditionedViT] Loaded conditioner from {_cond_path}")
             conditioner_params = trainer.experience_maker.conditioner.get_trainable_parameters()
             if conditioner_params:
                 conditioner_lr = 1e-2

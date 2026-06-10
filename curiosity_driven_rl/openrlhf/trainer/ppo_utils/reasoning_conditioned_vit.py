@@ -110,6 +110,7 @@ class ZeroInitAdapterLayer(nn.Module):
         visual_features: torch.Tensor,        # (N_patches, d_visual) — packed, no batch dim
         adapter_features: torch.Tensor,        # (1, K_adapt, d_reasoning) — the reasoning prompts
         original_block_output: torch.Tensor,   # (N_patches, d_visual) — output of frozen block
+        return_attn: bool = False,
     ) -> torch.Tensor:
         """
         Compute adapter contribution and add to the frozen block's output.
@@ -122,6 +123,8 @@ class ZeroInitAdapterLayer(nn.Module):
 
         Returns:
             modified_output: (N_patches, d_visual)
+            When return_attn=True: (modified_output, attn_weights) where
+                attn_weights shape is (1, n_heads, N_patches, K_adapt), float32
         """
         N, D = visual_features.shape
         K_adapt = adapter_features.shape[1]
@@ -174,7 +177,10 @@ class ZeroInitAdapterLayer(nn.Module):
         adapter_output = self.adapter_out_proj(adapter_output)
         adapter_output = adapter_output.squeeze(0)  # (N, D)
 
-        return original_block_output + adapter_output
+        result = original_block_output + adapter_output
+        if return_attn:
+            return result, attn_weights.detach().float()
+        return result
 
 
 # =============================================================================
@@ -373,6 +379,10 @@ class ConditionedViT(nn.Module):
                 n_heads=n_heads,
             )
         self.inject_at = set(inject_at)
+        # Populated by forward() when capture_attn=True; dict {block_idx: attn_weights}
+        self._last_captured_attn: dict = {}
+        # Counter for PathB encode calls; used to gate attention logging frequency
+        self._pathb_call_count: int = 0
 
     def forward(
         self,
@@ -380,6 +390,7 @@ class ConditionedViT(nn.Module):
         grid_thw: torch.Tensor,
         reasoning_input_ids: Optional[torch.Tensor] = None,
         reasoning_attention_mask: Optional[torch.Tensor] = None,
+        capture_attn: bool = False,
     ) -> torch.Tensor:
         """
         Run the conditioned ViT.
@@ -437,6 +448,12 @@ class ConditionedViT(nn.Module):
         # Gradient checkpointing per block: recompute activations during backward
         # instead of storing all 32 blocks' Q/K/V/FFN tensors. Reduces ViT activation
         # memory by ~32x at the cost of one extra forward pass per block during backward.
+        #
+        # When capture_attn=True: skip grad_ckpt and call blocks directly so that
+        # attn_weights survive past the forward pass. This path is only used under
+        # torch.no_grad() (called from compare_attn_stats), so no recomputation needed.
+        if capture_attn:
+            self._last_captured_attn = {}
         for idx, block in enumerate(self.vit.blocks):
             this_cu_seqlens = cu_seqlens if idx in fullatt_block_indexes else cu_window_seqlens
 
@@ -444,24 +461,34 @@ class ConditionedViT(nn.Module):
                 pre_block_features = x.detach()
                 adp_layer = self.adapter_layers[str(idx)]
 
-                # Default-arg capture binds all loop variables correctly per iteration.
-                def _fwd_with_adapter(
-                    x_,
-                    _blk=block, _cu=this_cu_seqlens, _pe=position_embeddings,
-                    _pre=pre_block_features, _adp=adapter_prompts, _adl=adp_layer,
-                ):
-                    out = _blk(x_, cu_seqlens=_cu, position_embeddings=_pe)
-                    return _adl(visual_features=_pre, adapter_features=_adp, original_block_output=out)
+                if capture_attn:
+                    # Direct call — always under no_grad, so no grad_ckpt needed.
+                    out = block(x, cu_seqlens=this_cu_seqlens, position_embeddings=position_embeddings)
+                    x, aw = adp_layer(visual_features=pre_block_features, adapter_features=adapter_prompts,
+                                      original_block_output=out, return_attn=True)
+                    self._last_captured_attn[idx] = aw
+                else:
+                    # Default-arg capture binds all loop variables correctly per iteration.
+                    def _fwd_with_adapter(
+                        x_,
+                        _blk=block, _cu=this_cu_seqlens, _pe=position_embeddings,
+                        _pre=pre_block_features, _adp=adapter_prompts, _adl=adp_layer,
+                    ):
+                        out = _blk(x_, cu_seqlens=_cu, position_embeddings=_pe)
+                        return _adl(visual_features=_pre, adapter_features=_adp, original_block_output=out)
 
-                x = grad_ckpt(_fwd_with_adapter, x, use_reentrant=False)
+                    x = grad_ckpt(_fwd_with_adapter, x, use_reentrant=False)
             else:
-                def _fwd_block(
-                    x_,
-                    _blk=block, _cu=this_cu_seqlens, _pe=position_embeddings,
-                ):
-                    return _blk(x_, cu_seqlens=_cu, position_embeddings=_pe)
+                if capture_attn:
+                    x = block(x, cu_seqlens=this_cu_seqlens, position_embeddings=position_embeddings)
+                else:
+                    def _fwd_block(
+                        x_,
+                        _blk=block, _cu=this_cu_seqlens, _pe=position_embeddings,
+                    ):
+                        return _blk(x_, cu_seqlens=_cu, position_embeddings=_pe)
 
-                x = grad_ckpt(_fwd_block, x, use_reentrant=False)
+                    x = grad_ckpt(_fwd_block, x, use_reentrant=False)
 
         # Step 4: Merger + reverse window ordering.
         # Run without no_grad so the adapter residuals from block 31 remain connected
@@ -505,6 +532,145 @@ class ConditionedViT(nn.Module):
             else:
                 vals = ", ".join(f"{v:.4f}" for v in gate_tanh.tolist())
                 print(f"[ConditionedViT] Block {name:>2s} gate (per-head): [{vals}]")
+
+    @torch.no_grad()
+    def compare_attn_stats(
+        self,
+        pixel_values: torch.Tensor,
+        grid_thw: torch.Tensor,
+        reasoning_ids: torch.Tensor,
+        reasoning_mask: torch.Tensor,
+    ) -> dict:
+        """
+        Run conditioned and unconditioned forward passes, return attention stats.
+
+        Returns dict with:
+          'entropy': {block_idx: tensor(N_patches,)} — mean adapter attention entropy
+                     across heads per patch (in nats, max = log(K_adapt) ≈ 3.47)
+          'feature_delta': tensor(N_merged,) — ||f_cond - f_uncond||_2 per merged patch
+        """
+        # Conditioned pass — capture adapter attention weights
+        cond_features = self.forward(
+            pixel_values, grid_thw, reasoning_ids, reasoning_mask, capture_attn=True
+        )
+        captured = {k: v.clone() for k, v in self._last_captured_attn.items()}
+
+        # Unconditioned pass — same ViT, no reasoning conditioning
+        uncond_features = self.forward(
+            pixel_values, grid_thw, None, None, capture_attn=True
+        )
+
+        # Adapter attention entropy per block (conditioned only)
+        entropy = {}
+        for bidx, aw in captured.items():
+            # aw: (1, n_heads, N, K_adapt), float32 after detach
+            eps = 1e-8
+            H = -(aw * (aw + eps).log()).sum(dim=-1)  # (1, n_heads, N)
+            entropy[bidx] = H.mean(dim=(0, 1)).cpu()  # (N,)
+
+        # Feature delta: L2 norm of difference per merged patch
+        delta = (cond_features.float() - uncond_features.float()).norm(dim=-1).cpu()  # (N_merged,)
+
+        return {'entropy': entropy, 'feature_delta': delta}
+
+    def maybe_log_attn(
+        self,
+        pixel_values: torch.Tensor,
+        grid_thw: torch.Tensor,
+        reasoning_ids: torch.Tensor,
+        reasoning_mask: torch.Tensor,
+        save_dir: Optional[str] = None,
+    ) -> None:
+        """
+        Frequency-gated attention logging. Call this after every PathB encode.
+
+        Every 100 PathB calls: log entropy scalars and feature delta to stdout.
+        Every 500 PathB calls: additionally save a heatmap PNG to save_dir
+            (or the ATTN_VIZ_DIR env var if save_dir is None).
+        """
+        self._pathb_call_count += 1
+        count = self._pathb_call_count
+
+        if count % 100 != 0:
+            return
+
+        try:
+            stats = self.compare_attn_stats(pixel_values, grid_thw, reasoning_ids, reasoning_mask)
+        except Exception as e:
+            print(f"[AttnViz] compare_attn_stats failed (step {count}): {e}")
+            return
+
+        for bidx in sorted(stats['entropy'].keys()):
+            ent = stats['entropy'][bidx]
+            print(f"[AttnViz] pathb={count} block={bidx:2d} "
+                  f"entropy mean={ent.mean().item():.4f} max={ent.max().item():.4f}")
+        delta = stats['feature_delta']
+        print(f"[AttnViz] pathb={count} feature_delta mean={delta.mean().item():.4f} "
+              f"max={delta.max().item():.4f}")
+
+        if count % 500 == 0:
+            import os as _os
+            _save_dir = save_dir or _os.environ.get('ATTN_VIZ_DIR', None)
+            if _save_dir:
+                try:
+                    _save_attn_heatmaps(stats, grid_thw, count, _save_dir)
+                except Exception as e:
+                    print(f"[AttnViz] heatmap save failed (step {count}): {e}")
+
+
+def _save_attn_heatmaps(stats: dict, grid_thw: torch.Tensor, step: int, save_dir: str) -> None:
+    """
+    Save adapter attention entropy heatmaps + feature delta map as a PNG.
+
+    Layout: one subplot per adapter block (entropy) + one subplot for feature delta.
+    Each block heatmap is reshaped to the spatial patch grid (H_patches × W_patches).
+    Feature delta is at merger resolution (H_patches//2 × W_patches//2).
+    """
+    import os as _os
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    _os.makedirs(save_dir, exist_ok=True)
+
+    # Spatial dimensions from grid_thw: [[T, H_patches, W_patches], ...]
+    thw = grid_thw[0]
+    H_p = int(thw[1])   # height in pre-merger patches
+    W_p = int(thw[2])   # width  in pre-merger patches
+    H_m = H_p // 2      # height after 2×2 merger
+    W_m = W_p // 2      # width  after 2×2 merger
+
+    entropy_blocks = sorted(stats['entropy'].keys())
+    n_cols = len(entropy_blocks) + 1  # +1 for feature delta
+    fig, axes = plt.subplots(1, n_cols, figsize=(4 * n_cols, 4))
+    if n_cols == 1:
+        axes = [axes]
+
+    for col, bidx in enumerate(entropy_blocks):
+        ent = stats['entropy'][bidx].float().numpy()  # (N,)
+        grid = ent.reshape(H_p, W_p) if ent.size == H_p * W_p else ent.reshape(1, -1)
+        ax = axes[col]
+        im = ax.imshow(grid, cmap='hot', vmin=0.0, interpolation='nearest')
+        ax.set_title(f'Block {bidx}\nadapter entropy', fontsize=9)
+        ax.axis('off')
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    # Feature delta subplot
+    delta = stats['feature_delta'].float().numpy()  # (N_merged,)
+    grid_d = delta.reshape(H_m, W_m) if delta.size == H_m * W_m else delta.reshape(1, -1)
+    ax = axes[-1]
+    im = ax.imshow(grid_d, cmap='viridis', interpolation='nearest')
+    ax.set_title('Feature delta\n||cond − uncond||', fontsize=9)
+    ax.axis('off')
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    fig.suptitle(f'Attention visualization — PathB step {step}', fontsize=11)
+    plt.tight_layout()
+
+    out_path = _os.path.join(save_dir, f'attn_viz_step{step:07d}.png')
+    plt.savefig(out_path, dpi=100, bbox_inches='tight')
+    plt.close(fig)
+    print(f"[AttnViz] Saved: {out_path}")
 
 
 # =============================================================================
@@ -737,12 +903,25 @@ class ReasoningConditionerV2(nn.Module):
         Call this inside training_step_actor (with grads enabled) so PPO loss
         can backprop into the adapter weights.
         """
-        return self.conditioned_vit(
+        features = self.conditioned_vit(
             pixel_values=pixel_values,
             grid_thw=grid_thw,
             reasoning_input_ids=reasoning_ids,
             reasoning_attention_mask=reasoning_mask,
         )
+        # Log attention entropy scalars every 100 PathB calls; save PNG every 500.
+        # Runs under no_grad in a try/except so logging failures never break training.
+        import os as _os
+        _save_dir = getattr(self, '_attn_viz_dir', None) or _os.environ.get('ATTN_VIZ_DIR', None)
+        try:
+            with torch.no_grad():
+                self.conditioned_vit.maybe_log_attn(
+                    pixel_values.detach(), grid_thw, reasoning_ids.detach(), reasoning_mask.detach(),
+                    save_dir=_save_dir,
+                )
+        except Exception as _e:
+            print(f"[AttnViz] maybe_log_attn failed: {_e}")
+        return features
 
     def get_trainable_parameters(self):
         """All trainable parameters: adapters + encoder + decoder."""

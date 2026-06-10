@@ -441,6 +441,8 @@ class PPOTrainer(ABC):
             if (steps +1)%1 == 0:
                 print(f"===> done train step, save?")
                 savepath = self._save_checkpoint(args, tag, client_states)
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.barrier()  # all ranks finish checkpoint before next rollout
             pbar.update()
             steps = steps + 1
         return steps 
