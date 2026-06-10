@@ -608,7 +608,7 @@ class ConditionedViT(nn.Module):
         print(f"[AttnViz] pathb={count} feature_delta mean={delta.mean().item():.4f} "
               f"max={delta.max().item():.4f}")
 
-        if count % 500 == 0:
+        if count % 10 == 0:
             import os as _os
             _save_dir = save_dir or _os.environ.get('ATTN_VIZ_DIR', None)
             if _save_dir:
