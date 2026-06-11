@@ -481,6 +481,9 @@ class ActorModelRayActor(BasePPORole):
             _, states = strategy.load_ckpt(self.actor.model, ckpt_path)
             self.consumed_samples = states["consumed_samples"]
             strategy.print(f"Loaded the checkpoint: {ckpt_path}, consumed_samples: {self.consumed_samples}")
+        if getattr(args, "consumed_samples", 0) > 0:
+            self.consumed_samples = args.consumed_samples
+            strategy.print(f"[resume] consumed_samples overridden to {self.consumed_samples} via --consumed_samples")
 
         # conditioner optimizer — separate from DeepSpeed-managed actor optimizer
         self.conditioner_optim = None

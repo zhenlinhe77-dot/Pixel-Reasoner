@@ -307,6 +307,7 @@ if __name__ == "__main__":
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--consumed_samples", type=int, default=0, help="Skip this many prompt samples at startup (resume past already-trained steps)")\n    parser.add_argument("--consumed_samples", type=int, default=0, help="Skip this many prompt samples at startup (resume past already-trained steps)")
     parser.add_argument("--freezing_actor_steps", type=int, default=-1, help="Used for critic initialization")
     parser.add_argument(
         "--n_samples_per_prompt", type=int, default=1, help="number of responses for each prompt in generation"
