@@ -754,8 +754,12 @@ class PPOTrainer(ABC):
             _device = sequences.device if not isinstance(sequences, list) else sequences[0].device
             _dtype  = next(_conditioner.parameters()).dtype
 
-            _pv  = _reenc_pv.to(_device, _dtype)
-            _thw = _reenc_thw.to(_device)
+            # _rid / _rmk carry the reasoning state from the experience (what the
+            # model has thought so far).  _pv / _thw are NOT used for the image:
+            # we always re-encode the ORIGINAL full image so that cf has the same
+            # token count as the actor's visual output and the splice is valid.
+            # (Using the stored _reenc_pv would give cropped-image features with a
+            # different token count, causing the splice guard to silently skip.)
             _rid = _reenc_rid.to(_device).long()   # embedding requires int64
             _rmk = _reenc_rmk.to(_device).long()
             _img_idx = int(_reenc_idx.item())
@@ -763,14 +767,22 @@ class PPOTrainer(ABC):
             # Compute patch_start / patch_end inside the concatenated model.visual output.
             # image_grid_thw rows: (T, H, W); merged patches per image = T*H*W // 4
             _igt = visual_inputs.get('image_grid_thw')
-            if _igt is not None and _igt.shape[0] > _img_idx:
+            _pv_full = visual_inputs.get('pixel_values')
+            if _igt is not None and _igt.shape[0] > _img_idx and _pv_full is not None:
                 _merged = _igt[:, 0] * _igt[:, 1] * _igt[:, 2] // 4
                 _ps = int(_merged[:_img_idx].sum().item())
                 _pe = _ps + int(_merged[_img_idx].item())
+                # Extract the original image's raw patches from the batched pixel_values
+                _thw = _igt[_img_idx:_img_idx + 1]           # (1, 3)
+                _raw_counts = _igt[:, 0] * _igt[:, 1] * _igt[:, 2]
+                _patch_start = int(_raw_counts[:_img_idx].sum().item())
+                _patch_end   = _patch_start + int(_raw_counts[_img_idx].item())
+                _pv = _pv_full[_patch_start:_patch_end].to(_device, _dtype)
             else:
                 _ps, _pe = 0, 0
+                _pv, _thw = None, None
 
-            if _pe > _ps:
+            if _pe > _ps and _pv is not None:
                 _conditioner.conditioned_vit.train()
                 _n_patches = int(_pv.shape[0])
                 # Storage now caps at 1024 patches (max_pixels=200704); 1200 guards
@@ -799,22 +811,10 @@ class PPOTrainer(ABC):
                         _pe = 0
 
                 if _cf is not None:
-                    # _cf: (N_merged, 3584) with gradient through adapter layers.
-                    # _cf may have fewer tokens than (pe-ps) when _pv came from a
-                    # cropped/zoomed image (fewer patches than the full image the
-                    # actor sees).  Interpolate to match so the hook always fires
-                    # and gradients always flow to the conditioner.
-                    _target_len = _pe - _ps
-                    if _cf.shape[0] != _target_len and _target_len > 0:
-                        _dtype_cf = _cf.dtype
-                        # (N, d) → (1, d, N) → interpolate → (1, d, T) → (T, d)
-                        _cf = torch.nn.functional.interpolate(
-                            _cf.float().T.unsqueeze(0),
-                            size=_target_len,
-                            mode='linear',
-                            align_corners=False,
-                        ).squeeze(0).T.to(_dtype_cf)
-                        print(f"[PathB-train] cf interpolated to ({_target_len}, {_cf.shape[1]}) for splice")
+                    # _cf: (N_merged, 3584) — same token count as the actor's
+                    # full-image visual output because _pv is now the original
+                    # image's patches (not a crop).  The splice guard below will
+                    # always pass.
                     _snap_ps, _snap_pe, _snap_cf = _ps, _pe, _cf
 
                     def _splice_hook(module, inp, out):
