@@ -640,6 +640,11 @@ class PPOTrainer(ABC):
                           f"gate_raw={_raw}  grad={_g_str}")
             self.conditioner_optim.step()
             self.conditioner_optim.zero_grad()
+            # Print gate values post-step every 5 steps to confirm movement
+            if _cond is not None and hasattr(_cond, 'conditioned_vit') and global_steps % 5 == 0:
+                for _bn, _layer in _cond.conditioned_vit.adapter_layers.items():
+                    _raw = "[" + ", ".join(f"{v:.4e}" for v in _layer.gate.tolist()) + "]"
+                    print(f"[gate post-step] step={global_steps} block={_bn}: gate_raw={_raw}")
         return status
 
     def training_step_actor(self, experience: Experience, **kwargs) -> Dict[str, float]:
@@ -794,7 +799,22 @@ class PPOTrainer(ABC):
                         _pe = 0
 
                 if _cf is not None:
-                    # _cf: (N_merged, 3584) with gradient through adapter layers
+                    # _cf: (N_merged, 3584) with gradient through adapter layers.
+                    # _cf may have fewer tokens than (pe-ps) when _pv came from a
+                    # cropped/zoomed image (fewer patches than the full image the
+                    # actor sees).  Interpolate to match so the hook always fires
+                    # and gradients always flow to the conditioner.
+                    _target_len = _pe - _ps
+                    if _cf.shape[0] != _target_len and _target_len > 0:
+                        _dtype_cf = _cf.dtype
+                        # (N, d) → (1, d, N) → interpolate → (1, d, T) → (T, d)
+                        _cf = torch.nn.functional.interpolate(
+                            _cf.float().T.unsqueeze(0),
+                            size=_target_len,
+                            mode='linear',
+                            align_corners=False,
+                        ).squeeze(0).T.to(_dtype_cf)
+                        print(f"[PathB-train] cf interpolated to ({_target_len}, {_cf.shape[1]}) for splice")
                     _snap_ps, _snap_pe, _snap_cf = _ps, _pe, _cf
 
                     def _splice_hook(module, inp, out):
