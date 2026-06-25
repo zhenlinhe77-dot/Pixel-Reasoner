@@ -787,8 +787,8 @@ class PPOTrainer(ABC):
                 _n_patches = int(_pv.shape[0])
                 # Storage now caps at 1024 patches (max_pixels=200704); 1200 guards
                 # against processor rounding edge cases.
-                _MAX_PATCHES = 1200
-                _MAX_SEQ_LEN = 2048
+                _MAX_PATCHES = 2000
+                _MAX_SEQ_LEN = 6000
                 _cf = None
                 if _n_patches > _MAX_PATCHES:
                     print(f"[PathB-train] skipping encode_for_llm: {_n_patches} patches > {_MAX_PATCHES} limit")
